@@ -1,0 +1,29 @@
+# Expo
+.expo/
+dist/
+web-build/
+
+# Node
+node_modules/
+npm-debug.log
+yarn-error.log
+
+# macOS
+.DS_Store
+
+# iOS/Android (Si prebuild ou éjecté)
+ios/
+android/
+
+# Environnement
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Typescript
+*.tsbuildinfo
+
+# Watchman
+.watchmanconfig

@@ -1,0 +1,22 @@
+{
+  "expo": {
+    "name": "PocketPilot",
+    "slug": "pocketpilot",
+    "version": "1.0.0",
+    "sdkVersion": "54.0.0",
+    "entryPoint": "./App.tsx",
+    "icon": "./assets/icon.png",
+    "backgroundColor": "#1a1a2e",
+    "splash": {
+      "image": "./assets/splash.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#1a1a2e"
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#1a1a2e"
+      }
+    }
+  }
+}

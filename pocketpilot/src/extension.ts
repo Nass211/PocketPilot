@@ -31,7 +31,7 @@ export async function activate(context: vscode.ExtensionContext) {
 	statusBar = new StatusBarManager();
 	statusBar.show();
 
-	tunnelManager = new TunnelManager();
+	tunnelManager = new TunnelManager(context.extensionPath);
 	qrPanel = new QRCodePanel();
 	wsManager = new WebSocketManager(authToken);
 	session = new SessionManager(context);

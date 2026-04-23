@@ -1,11 +1,19 @@
 import { spawn, ChildProcess } from 'child_process';
 import { EventEmitter } from 'events';
+import * as path from 'path';
+import * as fs from 'fs';
 
 const TUNNEL_TIMEOUT_MS = 15_000;
 
 export class TunnelManager extends EventEmitter {
     private process: ChildProcess | null = null;
     private _tunnelUrl: string | null = null;
+    private extensionRoot: string;
+
+    constructor(extensionRoot: string) {
+        super();
+        this.extensionRoot = extensionRoot;
+    }
 
     get tunnelUrl(): string | null {
         return this._tunnelUrl;
@@ -15,10 +23,27 @@ export class TunnelManager extends EventEmitter {
         return this.process !== null && !this.process.killed;
     }
 
-    /** Check if cloudflared is installed. */
+    /**
+     * Resolve the cloudflared binary path.
+     * 1. Check for a bundled binary next to the extension (e.g. pocketpilot/cloudflared)
+     * 2. Fall back to the system PATH
+     */
+    private getCloudflaredPath(): string {
+        // Check for bundled binary in the extension root directory
+        const bundledName = process.platform === 'win32' ? 'cloudflared.exe' : 'cloudflared';
+        const bundledPath = path.join(this.extensionRoot, bundledName);
+        if (fs.existsSync(bundledPath)) {
+            return bundledPath;
+        }
+        // Fall back to system PATH
+        return 'cloudflared';
+    }
+
+    /** Check if cloudflared is installed (bundled or system). */
     async checkInstalled(): Promise<boolean> {
         return new Promise((resolve) => {
-            const proc = spawn('cloudflared', ['--version']);
+            const bin = this.getCloudflaredPath();
+            const proc = spawn(bin, ['--version']);
             proc.on('error', () => resolve(false));
             proc.on('close', (code) => resolve(code === 0));
         });
@@ -33,8 +58,10 @@ export class TunnelManager extends EventEmitter {
             this.stop();
         }
 
+        const bin = this.getCloudflaredPath();
+
         return new Promise((resolve, reject) => {
-            this.process = spawn('cloudflared', [
+            this.process = spawn(bin, [
                 'tunnel', '--url', `http://localhost:${port}`,
             ]);
 

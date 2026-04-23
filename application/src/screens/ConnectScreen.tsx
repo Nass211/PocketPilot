@@ -8,6 +8,28 @@ import { useAppContext } from '../context/AppContext';
 import { useTheme, ThemeColors } from '../context/ThemeContext';
 import Logo from '../components/Logo';
 
+/**
+ * Normalize a user-typed URL into a valid WebSocket URL.
+ * - Bare IP:port (e.g. "192.168.1.5:3000") → ws://192.168.1.5:3000
+ * - https://... → wss://...
+ * - http://...  → ws://...
+ * - ws:// / wss:// → kept as-is
+ */
+function normalizeUrl(raw: string): string {
+  const trimmed = raw.trim();
+  if (trimmed.startsWith('https://')) {
+    return trimmed.replace('https://', 'wss://');
+  }
+  if (trimmed.startsWith('http://')) {
+    return trimmed.replace('http://', 'ws://');
+  }
+  if (trimmed.startsWith('ws://') || trimmed.startsWith('wss://')) {
+    return trimmed;
+  }
+  // Bare IP:port — prefix ws://
+  return `ws://${trimmed}`;
+}
+
 export default function ConnectScreen({ navigation, route }: any) {
   const { colors } = useTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
@@ -18,6 +40,13 @@ export default function ConnectScreen({ navigation, route }: any) {
   const [permission, requestPermission] = useCameraPermissions();
   const [connections, setConnections] = useState<SavedConnection[]>([]);
   const [isConnecting, setIsConnecting] = useState(false);
+  const [connectionAttempt, setConnectionAttempt] = useState<string>('');
+
+  // Timer refs for local→tunnel fallback and total connection timeout
+  const connectionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const totalTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Ref to track connected state (avoids stale closure in setTimeout callbacks)
+  const isConnectedRef = useRef(false);
 
   useEffect(() => {
     loadConnections();
@@ -27,6 +56,27 @@ export default function ConnectScreen({ navigation, route }: any) {
   const loadConnections = async () => {
     const conns = await StorageService.getAllConnections();
     setConnections(conns);
+  };
+
+  // Clean up all connection timers
+  const clearAllTimers = () => {
+    if (connectionTimerRef.current) {
+      clearTimeout(connectionTimerRef.current);
+      connectionTimerRef.current = null;
+    }
+    if (totalTimeoutRef.current) {
+      clearTimeout(totalTimeoutRef.current);
+      totalTimeoutRef.current = null;
+    }
+  };
+
+  const abortConnection = (message: string) => {
+    clearAllTimers();
+    ws.disconnect();
+    setIsConnecting(false);
+    setConnectionAttempt('');
+    isConnectedRef.current = false;
+    Alert.alert('Connection Failed', message);
   };
 
   const checkLastConnection = async () => {
@@ -43,11 +93,17 @@ export default function ConnectScreen({ navigation, route }: any) {
 
   useEffect(() => {
     if (ws.status === 'connected') {
+       // Connection successful — clean up all timers and navigate
+       isConnectedRef.current = true;
+       clearAllTimers();
+       setConnectionAttempt('');
        navigation.replace('Chat');
        setIsConnecting(false);
-    } else if ((ws.status as any) === 'error') {
-       setIsConnecting(false);
-       Alert.alert('Error', 'Unable to connect');
+    } else if (ws.status === 'reconnecting' && isConnecting) {
+       // Update the status text so user knows what's happening
+       setConnectionAttempt((prev) =>
+         prev.includes('tunnel') ? 'Tunnel connection lost, retrying…' : 'Connection failed, retrying…'
+       );
     }
   }, [ws.status]);
 
@@ -80,16 +136,19 @@ export default function ConnectScreen({ navigation, route }: any) {
     }
   };
 
-  const handleConnect = async (primaryUrl: string, authToken: string, fallbackUrl?: string) => {
+  const handleConnect = async (primaryUrl: string, authToken: string, fallbackLocalUrl?: string) => {
     if (!primaryUrl || !authToken) return;
     
+    // Reset state
+    isConnectedRef.current = false;
+    clearAllTimers();
     setIsConnecting(true);
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
 
     // Save for later
     await StorageService.saveConnection({
       url: primaryUrl,
-      localUrl: fallbackUrl || '',
+      localUrl: fallbackLocalUrl || '',
       token: authToken,
       label: `Connection ${new Date().toLocaleDateString()}`,
       lastUsed: Date.now()
@@ -97,9 +156,59 @@ export default function ConnectScreen({ navigation, route }: any) {
 
     loadConnections();
     
-    // Connect WS
-    ws.connect(primaryUrl, authToken);
-    // Timeout fallback (simplified) could be added here
+    // Determine if we have both local and tunnel URLs from QR payload.
+    // QR format: { url: tunnel_or_local, localUrl: always_LAN, token }
+    // When tunnel active: url = "wss://..." (tunnel), localUrl = "ws://IP:3000" (LAN)
+    // When no tunnel:     url = "ws://IP:3000" (LAN),  localUrl = "ws://IP:3000" (same)
+    const hasBothUrls = fallbackLocalUrl && fallbackLocalUrl !== primaryUrl;
+
+    if (hasBothUrls) {
+      // Local-first strategy: try the LAN address first (faster, lower latency)
+      setConnectionAttempt('Trying local network…');
+      ws.connect(fallbackLocalUrl, authToken, fallbackLocalUrl, primaryUrl);
+
+      // If local doesn't connect within 3 seconds, fall back to tunnel
+      connectionTimerRef.current = setTimeout(() => {
+        if (!isConnectedRef.current) {
+          console.log('Local connection timed out after 3s, falling back to tunnel');
+          ws.disconnect();
+          setConnectionAttempt('Local failed — trying tunnel…');
+          ws.connect(primaryUrl, authToken, fallbackLocalUrl, primaryUrl);
+        }
+      }, 3000);
+
+      // Total timeout: give up after 15s (3s local + 12s tunnel)
+      totalTimeoutRef.current = setTimeout(() => {
+        if (!isConnectedRef.current) {
+          abortConnection(
+            'Could not reach the VS Code extension.\n\n' +
+            '• Make sure the extension is running (F5 in VS Code)\n' +
+            '• Run "PocketPilot: Start Server" command\n' +
+            '• If not on the same Wi-Fi, enable tunnel in VS Code'
+          );
+        }
+      }, 15000);
+    } else {
+      // Single URL — connect directly
+      const isTunnel = primaryUrl.startsWith('wss://');
+      setConnectionAttempt(isTunnel ? 'Connecting via tunnel…' : 'Connecting…');
+      ws.connect(primaryUrl, authToken);
+
+      // Total timeout: give up after 10s
+      totalTimeoutRef.current = setTimeout(() => {
+        if (!isConnectedRef.current) {
+          abortConnection(
+            isTunnel
+              ? 'Tunnel connection failed.\n\n• Make sure the tunnel is still active in VS Code\n• Try scanning a fresh QR code'
+              : 'Could not reach the VS Code extension.\n\n' +
+                '• Make sure the extension is running (F5 in VS Code)\n' +
+                '• Run "PocketPilot: Start Server" command\n' +
+                '• Your phone must be on the same Wi-Fi as your computer\n' +
+                '• Or enable tunnel in VS Code for remote access'
+          );
+        }
+      }, 10000);
+    }
   };
 
   // --- UI Renders ---
@@ -160,7 +269,7 @@ export default function ConnectScreen({ navigation, route }: any) {
          <TouchableOpacity 
             style={[styles.primaryButton, (!url || !token || isConnecting) && styles.disabledButton]} 
             disabled={!url || !token || isConnecting}
-            onPress={() => handleConnect(url, token)}
+            onPress={() => handleConnect(normalizeUrl(url), token)}
          >
            {isConnecting || ws.status === 'connecting' || ws.status === 'authenticating' ? (
               <ActivityIndicator color={colors.background} />
@@ -168,6 +277,10 @@ export default function ConnectScreen({ navigation, route }: any) {
               <Text style={styles.buttonText}>Connect</Text>
            )}
          </TouchableOpacity>
+
+         {isConnecting && connectionAttempt ? (
+           <Text style={styles.connectionAttemptText}>{connectionAttempt}</Text>
+         ) : null}
       </View>
 
       {connections.length > 0 && (
@@ -280,6 +393,12 @@ const createStyles = (colors: ThemeColors) => StyleSheet.create({
      paddingVertical: 16,
      paddingHorizontal: 40,
      borderRadius: 30,
+  },
+  connectionAttemptText: {
+    color: colors.textSecondary,
+    fontSize: 13,
+    textAlign: 'center',
+    marginTop: 12,
   },
   historyContainer: {
     marginTop: 32,

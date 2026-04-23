@@ -2,7 +2,7 @@ import React from 'react';
 import { useEffect, useState, useRef, useCallback, useMemo } from 'react';
 import { 
   View, Text, TextInput, TouchableOpacity, FlatList, 
-  StyleSheet, KeyboardAvoidingView, Platform, Alert 
+  StyleSheet, KeyboardAvoidingView, Platform, Alert, Animated 
 } from 'react-native';
 import { useAppContext } from '../context/AppContext';
 import { useChat } from '../hooks/useChat';
@@ -32,7 +32,7 @@ export default function ChatScreen({ navigation, route }: any) {
   const [showAttachmentMenu, setShowAttachmentMenu] = useState(false);
   const [isRecordingAudio, setIsRecordingAudio] = useState(false);
   const [currentMode, setCurrentMode] = useState<Mode>('ask');
-  const [currentModel, setCurrentModel] = useState<string>('Claude Sonnet 4.6');
+  const [currentModel, setCurrentModel] = useState<string>('auto');
   const [overrideModel, setOverrideModel] = useState<boolean>(false);
   const flatListRef = useRef<FlatList>(null);
 
@@ -41,6 +41,11 @@ export default function ChatScreen({ navigation, route }: any) {
   const [userInputRequest, setUserInputRequest] = useState<UserInputRequestPayload | null>(null);
   const [actions, setActions] = useState<ActionButtonPayload[]>([]);
   const audioRecordingRef = useRef<Audio.Recording | null>(null);
+
+  // Non-blocking toast notification state
+  const [toastText, setToastText] = useState<string>('');
+  const toastOpacity = useRef(new Animated.Value(0)).current;
+  const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const chat = useChat(ws);
 
@@ -53,9 +58,31 @@ export default function ChatScreen({ navigation, route }: any) {
       onPermissionRequest: (data: PermissionRequestPayload) => setPermissionRequest(data),
       onUserInputRequest: (data: UserInputRequestPayload) => setUserInputRequest(data),
       onActionRequired: (data: ActionButtonPayload[]) => setActions(data),
-      onNotification: (data: any) => Alert.alert('Notification', data.message || JSON.stringify(data)),
+      onNotification: (data: any) => {
+        const text = data.body || data.title || data.message || '';
+        if (!text) return;
+        // Show non-blocking toast
+        setToastText(text);
+        Animated.timing(toastOpacity, { toValue: 1, duration: 200, useNativeDriver: true }).start();
+        // Auto-dismiss after 2s
+        if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+        toastTimerRef.current = setTimeout(() => {
+          Animated.timing(toastOpacity, { toValue: 0, duration: 400, useNativeDriver: true }).start();
+        }, 2000);
+      },
     };
   }, [ws, chat]);
+
+  // Sync model and mode from extension into local state
+  useEffect(() => {
+    if (ws.model) setCurrentModel(ws.model);
+  }, [ws.model]);
+
+  useEffect(() => {
+    if (ws.mode && ['ask', 'agent', 'plan'].includes(ws.mode)) {
+      setCurrentMode(ws.mode as Mode);
+    }
+  }, [ws.mode]);
 
   const handleModeChange = (mode: Mode) => {
     setCurrentMode(mode);
@@ -263,7 +290,7 @@ export default function ChatScreen({ navigation, route }: any) {
           <TouchableOpacity onPress={toggleTheme} style={{ marginRight: 16 }}>
             <Text style={{ fontSize: 20 }}>{theme === 'dark' ? '☀️' : '🌙'}</Text>
           </TouchableOpacity>
-          <ModelSelector currentModel={currentModel} onModelChange={handleModelChange} />
+          <ModelSelector currentModel={currentModel} onModelChange={handleModelChange} availableModels={ws.availableModels} />
         </View>
       </View>
       <Text style={styles.subtitleText}>{currentModel} · {currentMode}</Text>
@@ -287,6 +314,13 @@ export default function ChatScreen({ navigation, route }: any) {
       <UserInputModal request={userInputRequest} onAnswer={handleUserInputAnswer} />
       
       {renderHeader()}
+
+      {/* Non-blocking toast notification bar */}
+      {toastText ? (
+        <Animated.View style={[styles.toastBar, { opacity: toastOpacity }]}>
+          <Text style={styles.toastText} numberOfLines={1}>⚡ {toastText}</Text>
+        </Animated.View>
+      ) : null}
       
       <FlatList
         ref={flatListRef}
@@ -420,6 +454,18 @@ const createStyles = (colors: ThemeColors) => StyleSheet.create({
     color: colors.textSecondary,
     fontSize: 13,
     marginTop: 4,
+  },
+  toastBar: {
+    backgroundColor: colors.surface,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.border,
+    paddingVertical: 6,
+    paddingHorizontal: 16,
+  },
+  toastText: {
+    color: colors.textSecondary,
+    fontSize: 12,
+    fontWeight: '500',
   },
   listContent: {
     padding: 16,

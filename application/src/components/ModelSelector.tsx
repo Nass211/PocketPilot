@@ -1,17 +1,42 @@
 import React, { useMemo, useState } from 'react';
 import { Modal, View, Text, TouchableOpacity, StyleSheet, FlatList, TouchableWithoutFeedback } from 'react-native';
 import { useTheme, ThemeColors } from '../context/ThemeContext';
+import { AvailableModel } from '../hooks/useWebSocket';
 
 interface ModelSelectorProps {
   currentModel: string;
   onModelChange: (model: string) => void;
+  availableModels?: AvailableModel[];
 }
 
-export default function ModelSelector({ currentModel, onModelChange }: ModelSelectorProps) {
+// Fallback models if the extension hasn't sent available models yet
+const FALLBACK_MODELS = ['auto', 'GPT-4o', 'GPT-4.1', 'GPT-4.1-mini', 'claude-sonnet-4', 'o3', 'o4-mini'];
+
+export default function ModelSelector({ currentModel, onModelChange, availableModels }: ModelSelectorProps) {
   const { colors } = useTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
   const [modalVisible, setModalVisible] = useState(false);
-  const models = ['auto', 'GPT-4o', 'GPT-4.1', 'GPT-4.1-mini', 'claude-sonnet-4', 'o3', 'o4-mini'];
+
+  // Use dynamic models from extension if available, otherwise fallback
+  const models = useMemo(() => {
+    if (availableModels && availableModels.length > 0) {
+      // Always include 'auto' at the top, then the available models
+      const ids = availableModels.map(m => m.id);
+      return ['auto', ...ids];
+    }
+    return FALLBACK_MODELS;
+  }, [availableModels]);
+
+  // Build a display name map for nicer labels
+  const displayNames = useMemo(() => {
+    const map: Record<string, string> = { auto: 'Auto' };
+    if (availableModels) {
+      for (const m of availableModels) {
+        map[m.id] = m.displayName || m.id;
+      }
+    }
+    return map;
+  }, [availableModels]);
 
   const selectModel = (model: string) => {
     onModelChange(model);
@@ -21,7 +46,7 @@ export default function ModelSelector({ currentModel, onModelChange }: ModelSele
   return (
     <>
       <TouchableOpacity style={styles.button} onPress={() => setModalVisible(true)}>
-        <Text style={styles.buttonText}>{currentModel || 'Select Model'}</Text>
+        <Text style={styles.buttonText}>{displayNames[currentModel] || currentModel || 'Select Model'}</Text>
       </TouchableOpacity>
 
       <Modal
@@ -43,7 +68,7 @@ export default function ModelSelector({ currentModel, onModelChange }: ModelSele
                     onPress={() => selectModel(item)}
                   >
                     <Text style={[styles.itemText, currentModel === item && styles.itemTextActive]}>
-                      {item === 'auto' ? 'Auto' : item}
+                      {displayNames[item] || item}
                     </Text>
                   </TouchableOpacity>
                 )}

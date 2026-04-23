@@ -254,8 +254,9 @@ export class SessionManager extends EventEmitter {
                 this._hasHistory = true;
                 return session;
             } catch (err) {
-                // If a previously pinned model is unavailable, unlock model and retry.
-                if (this.isModelUnavailableError(err) && this.getPinnedModel()) {
+                if (this.isModelUnavailableError(err)) {
+                    // Model baked into the session is no longer available.
+                    // Reset to auto regardless of whether we explicitly pinned it.
                     this._currentModel = 'auto';
                     this.savePreferences();
                     this.emit('model_switched', 'auto');
@@ -283,7 +284,7 @@ export class SessionManager extends EventEmitter {
         try {
             session = await this.client!.createSession(config);
         } catch (err) {
-            if (this.isModelUnavailableError(err) && this.getPinnedModel()) {
+            if (this.isModelUnavailableError(err)) {
                 this._currentModel = 'auto';
                 this.savePreferences();
                 this.emit('model_switched', 'auto');
@@ -344,8 +345,22 @@ export class SessionManager extends EventEmitter {
 
         // Session errors
         this.eventUnsubs.push(session.on('session.error', (event) => {
+            const message = event.data.message ?? '';
+
+            // Model-unavailable errors are auto-recovered by sendPrompt() retry logic.
+            // Don't forward them to the phone — just reset and let the retry handle it.
+            if (this.isModelUnavailableError({ message })) {
+                this._currentModel = 'auto';
+                this.savePreferences();
+                this.emit('model_switched', 'auto');
+                // Destroy the stale session so ensureSession() creates a fresh one
+                this.destroySession().catch(() => { /* best effort */ });
+                this.context.globalState.update('pocketpilot.sessionId', undefined);
+                return;
+            }
+
             this.isBusy = false;
-            this.emit('error', 'SESSION_ERROR', event.data.message);
+            this.emit('error', 'SESSION_ERROR', message);
         }));
 
         // Tool execution status (forward as notifications)
@@ -417,6 +432,16 @@ export class SessionManager extends EventEmitter {
                             'GitHub authentication is required. Sign in to GitHub in VS Code and retry.',
                         );
                         break;
+                    }
+
+                    // If model is unavailable, reset to auto, destroy stale session, and retry once
+                    if (this.isModelUnavailableError(err)) {
+                        this._currentModel = 'auto';
+                        this.savePreferences();
+                        this.emit('model_switched', 'auto');
+                        await this.destroySession();
+                        await this.context.globalState.update('pocketpilot.sessionId', undefined);
+                        continue;
                     }
 
                     // sendAndWait throws on timeout or abort — only emit if unexpected
@@ -675,6 +700,22 @@ export class SessionManager extends EventEmitter {
             return models.map(m => m.id);
         } catch {
             return [];
+        }
+    }
+
+    /** Fetch models the user has access to and emit them for the phone. */
+    async emitAvailableModels(): Promise<void> {
+        try {
+            if (!this.client) { await this.startClient(); }
+            const models: ModelInfo[] = await this.client!.listModels();
+            const modelList = models.map(m => ({
+                id: m.id,
+                displayName: (m as any).displayName || m.id,
+                vendor: (m as any).vendor || 'unknown',
+            }));
+            this.emit('models_available', modelList);
+        } catch (err) {
+            console.error('[PocketPilot] Failed to fetch available models:', err);
         }
     }
 

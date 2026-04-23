@@ -11852,8 +11852,9 @@ class SessionManager extends events__WEBPACK_IMPORTED_MODULE_4__.EventEmitter {
                 return session;
             }
             catch (err) {
-                // If a previously pinned model is unavailable, unlock model and retry.
-                if (this.isModelUnavailableError(err) && this.getPinnedModel()) {
+                if (this.isModelUnavailableError(err)) {
+                    // Model baked into the session is no longer available.
+                    // Reset to auto regardless of whether we explicitly pinned it.
                     this._currentModel = 'auto';
                     this.savePreferences();
                     this.emit('model_switched', 'auto');
@@ -11879,7 +11880,7 @@ class SessionManager extends events__WEBPACK_IMPORTED_MODULE_4__.EventEmitter {
             session = await this.client.createSession(config);
         }
         catch (err) {
-            if (this.isModelUnavailableError(err) && this.getPinnedModel()) {
+            if (this.isModelUnavailableError(err)) {
                 this._currentModel = 'auto';
                 this.savePreferences();
                 this.emit('model_switched', 'auto');
@@ -11991,6 +11992,15 @@ class SessionManager extends events__WEBPACK_IMPORTED_MODULE_4__.EventEmitter {
                         }
                         this.emit('error', 'AUTH_REQUIRED', 'GitHub authentication is required. Sign in to GitHub in VS Code and retry.');
                         break;
+                    }
+                    // If model is unavailable, reset to auto, destroy stale session, and retry once
+                    if (this.isModelUnavailableError(err)) {
+                        this._currentModel = 'auto';
+                        this.savePreferences();
+                        this.emit('model_switched', 'auto');
+                        await this.destroySession();
+                        await this.context.globalState.update('pocketpilot.sessionId', undefined);
+                        continue;
                     }
                     // sendAndWait throws on timeout or abort — only emit if unexpected
                     if (!msg.includes('abort') && !msg.includes('cancel')) {
@@ -12211,6 +12221,24 @@ class SessionManager extends events__WEBPACK_IMPORTED_MODULE_4__.EventEmitter {
             return [];
         }
     }
+    /** Fetch models the user has access to and emit them for the phone. */
+    async emitAvailableModels() {
+        try {
+            if (!this.client) {
+                await this.startClient();
+            }
+            const models = await this.client.listModels();
+            const modelList = models.map(m => ({
+                id: m.id,
+                displayName: m.displayName || m.id,
+                vendor: m.vendor || 'unknown',
+            }));
+            this.emit('models_available', modelList);
+        }
+        catch (err) {
+            console.error('[PocketPilot] Failed to fetch available models:', err);
+        }
+    }
     // ── Persistence helpers ─────────────────────────────────────────
     savePreferences() {
         this.context.globalState.update('pocketpilot.model', this._currentModel);
@@ -12393,6 +12421,9 @@ async function activate(context) {
         wsManager?.send({ type: 'notification', title, body });
         outputChannel?.appendLine(`[${title}] ${body}`);
     });
+    session.on('models_available', (models) => {
+        wsManager?.send({ type: 'models_available', models });
+    });
     // ── WebSocket events ────────────────────────────────────────────
     wsManager.on('connected', async () => {
         statusBar?.setConnected();
@@ -12410,6 +12441,8 @@ async function activate(context) {
             });
         }
         catch { /* workspace info is best-effort */ }
+        // Send available models so the phone only shows what the user has access to
+        session.emitAvailableModels().catch(() => { });
     });
     wsManager.on('disconnected', () => {
         statusBar?.setWaiting();

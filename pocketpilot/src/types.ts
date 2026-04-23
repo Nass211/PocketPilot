@@ -35,4 +35,5 @@ export type OutgoingMessage =
     | { type: 'mode_switched'; mode: string }
     | { type: 'error'; code: string; message: string }
     | { type: 'cli_status'; status: 'running' | 'crashed' | 'reconnecting' }
-    | { type: 'notification'; title: string; body: string };
+    | { type: 'notification'; title: string; body: string }
+    | { type: 'models_available'; models: { id: string; displayName: string; vendor: string }[] };

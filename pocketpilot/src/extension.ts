@@ -92,6 +92,10 @@ export async function activate(context: vscode.ExtensionContext) {
 		outputChannel?.appendLine(`[${title}] ${body}`);
 	});
 
+	session.on('models_available', (models: Array<{ id: string; displayName: string; vendor: string }>) => {
+		wsManager?.send({ type: 'models_available', models });
+	});
+
 	// ── WebSocket events ────────────────────────────────────────────
 	wsManager.on('connected', async () => {
 		statusBar?.setConnected();
@@ -109,6 +113,9 @@ export async function activate(context: vscode.ExtensionContext) {
 				hasHistory: session!.hasHistory,
 			});
 		} catch { /* workspace info is best-effort */ }
+
+		// Send available models so the phone only shows what the user has access to
+		session!.emitAvailableModels().catch(() => { /* best effort */ });
 	});
 
 	wsManager.on('disconnected', () => {

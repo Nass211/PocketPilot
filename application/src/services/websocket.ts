@@ -5,6 +5,8 @@ type StatusCallback = (status: 'disconnected' | 'connecting' | 'connected' | 'er
 
 interface WebSocketOptions {
   url: string;
+  localUrl?: string;
+  tunnelUrl?: string;
   token: string;
   onMessage: MessageCallback;
   onStatusChange?: StatusCallback;
@@ -12,7 +14,9 @@ interface WebSocketOptions {
 
 export class WebSocketService {
   private ws: WebSocket | null = null;
-  private url: string;
+  private localUrl: string | null;
+  private tunnelUrl: string | null;
+  private activeUrl: string;
   private token: string;
   
   private onMessage: MessageCallback;
@@ -23,11 +27,25 @@ export class WebSocketService {
   private reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
   private isIntentionalClose = false;
 
+  // Tunnel fallback: after MAX_LOCAL_FAILURES consecutive failures on localUrl,
+  // automatically escalate to the tunnel URL.
+  private localReconnectFailures = 0;
+  private static readonly MAX_LOCAL_FAILURES = 3;
+
   constructor(options: WebSocketOptions) {
-    this.url = options.url;
+    this.activeUrl = options.url;
+    this.localUrl = options.localUrl ?? null;
+    this.tunnelUrl = options.tunnelUrl ?? null;
     this.token = options.token;
     this.onMessage = options.onMessage;
     this.onStatusChange = options.onStatusChange;
+  }
+
+  /**
+   * Returns the URL currently being used for the connection.
+   */
+  public getActiveUrl(): string {
+    return this.activeUrl;
   }
 
   /**
@@ -42,14 +60,14 @@ export class WebSocketService {
     this.updateStatus('connecting');
 
     try {
-      this.ws = new WebSocket(this.url);
+      this.ws = new WebSocket(this.activeUrl);
       
       this.ws.onopen = this.handleOpen.bind(this);
       this.ws.onmessage = this.handleMessage.bind(this);
       this.ws.onclose = this.handleClose.bind(this);
       this.ws.onerror = this.handleError.bind(this);
     } catch (error) {
-      console.error('WebSocket connection error:', error);
+      console.warn('WebSocket connection error:', error);
       this.updateStatus('error');
       this.scheduleReconnect();
     }
@@ -88,8 +106,9 @@ export class WebSocketService {
    * Gère l'ouverture de la connexion et envoie le token d'authentification
    */
   private handleOpen() {
-    console.log('WebSocket connected to', this.url);
+    console.log('WebSocket connected to', this.activeUrl);
     this.reconnectAttempts = 0; // Réinitialise le compteur de reconnexion
+    this.localReconnectFailures = 0; // Reset local failure counter on successful open
     this.updateStatus('connected');
     
     // Authentification instantanée dès l'ouverture
@@ -112,7 +131,7 @@ export class WebSocketService {
       // Transmission des autres messages via callback
       this.onMessage(data);
     } catch (error) {
-      console.error('WebSocket message parsing error:', error);
+      console.warn('WebSocket message parsing error:', error);
     }
   }
 
@@ -130,16 +149,29 @@ export class WebSocketService {
     }
   }
 
-  private handleError(event: Event) {
-    console.error('WebSocket error:', event);
+  private handleError(_event: Event) {
+    console.warn('WebSocket error on', this.activeUrl);
     this.updateStatus('error');
   }
 
   /**
    * Reconnexion automatique avec backoff exponentiel: 1s, 2s, 4s, 8s... (max 30s)
+   * After MAX_LOCAL_FAILURES consecutive failures on the local URL, automatically
+   * switches to the tunnel URL if one is available.
    */
   private scheduleReconnect() {
     if (this.isIntentionalClose) return;
+
+    // Tunnel escalation: if currently on localUrl and it keeps failing, switch to tunnel
+    if (this.localUrl && this.tunnelUrl && this.activeUrl === this.localUrl) {
+      this.localReconnectFailures++;
+      if (this.localReconnectFailures >= WebSocketService.MAX_LOCAL_FAILURES) {
+        console.log(`Local reconnect failed ${WebSocketService.MAX_LOCAL_FAILURES} times, switching to tunnel URL`);
+        this.activeUrl = this.tunnelUrl;
+        this.localReconnectFailures = 0;
+        this.reconnectAttempts = 0; // Reset backoff for the new URL
+      }
+    }
 
     // Calcul du backoff exponentiel
     const delay = Math.min(1000 * Math.pow(2, this.reconnectAttempts), this.maxReconnectDelay);

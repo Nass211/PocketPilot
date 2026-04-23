@@ -6,6 +6,12 @@ import { WebSocketMessage } from '../types/messages';
 export type ConnectionStatus = 'disconnected' | 'connecting' | 'authenticating' | 'connected' | 'reconnecting';
 export type CliStatus = 'running' | 'crashed' | 'reconnecting' | 'unknown';
 
+export interface AvailableModel {
+  id: string;
+  displayName: string;
+  vendor: string;
+}
+
 import { PermissionRequestPayload } from '../components/PermissionModal';
 import { UserInputRequestPayload } from '../components/UserInputModal';
 import { ActionButtonPayload } from '../components/ActionButtons';
@@ -28,20 +34,24 @@ export function useWebSocket(initialCallbacks: WebSocketCallbacks = {}) {
   const [mode, setMode] = useState<string>('');
   const [hasHistory, setHasHistory] = useState<boolean>(false);
   const [cliStatus, setCliStatus] = useState<CliStatus>('unknown');
+  const [availableModels, setAvailableModels] = useState<AvailableModel[]>([]);
 
   const wsRef = useRef<WebSocketService | null>(null);
   
   // Dynamic callbacks referencing
   const callbacksRef = useRef<WebSocketCallbacks>(initialCallbacks);
 
-  const connect = useCallback((url: string, token: string) => {
+  const connect = useCallback((url: string, token: string, localUrl?: string, tunnelUrl?: string) => {
     setStatus('connecting');
     
     wsRef.current = new WebSocketService({
       url,
       token,
+      localUrl,
+      tunnelUrl,
       onStatusChange: (wsStatus) => {
         if (wsStatus === 'connected') {
+          // TCP socket is open, auth message sent — wait for { type: 'connected' } from extension
           setStatus('authenticating'); 
         } else if (wsStatus === 'error') {
            setStatus((prev) => prev !== 'disconnected' ? 'reconnecting' : 'disconnected');
@@ -69,6 +79,7 @@ export function useWebSocket(initialCallbacks: WebSocketCallbacks = {}) {
             break;
           case 'chunk':
           case 'chat_updated':
+            // Handle both real extension ('chunk') and mock server ('chat_updated')
             callbacksRef.current.onChunk?.(msg.content);
             break;
           case 'done':
@@ -88,6 +99,23 @@ export function useWebSocket(initialCallbacks: WebSocketCallbacks = {}) {
             break;
           case 'notification':
             callbacksRef.current.onNotification?.(msg);
+            break;
+          case 'model_switched':
+            if (msg.model) setModel(msg.model);
+            break;
+          case 'mode_switched':
+            if (msg.mode) setMode(msg.mode);
+            break;
+          case 'workspace_info':
+            // Available for future use — no action needed
+            break;
+          case 'diff':
+            // Future feature — no action needed
+            break;
+          case 'models_available':
+            if (msg.models && Array.isArray(msg.models)) {
+              setAvailableModels(msg.models);
+            }
             break;
         }
       }
@@ -122,6 +150,7 @@ export function useWebSocket(initialCallbacks: WebSocketCallbacks = {}) {
     mode,
     hasHistory,
     cliStatus,
+    availableModels,
     connect,
     disconnect,
     send,

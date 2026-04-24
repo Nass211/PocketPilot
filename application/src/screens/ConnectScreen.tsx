@@ -76,7 +76,10 @@ export default function ConnectScreen({ navigation, route }: any) {
     setIsConnecting(false);
     setConnectionAttempt('');
     isConnectedRef.current = false;
-    Alert.alert('Connection Failed', message);
+    Alert.alert('Connection Failed', message, [
+      { text: 'Scan QR Code', onPress: () => startScan() },
+      { text: 'OK', style: 'cancel' },
+    ]);
   };
 
   const checkLastConnection = async () => {
@@ -84,6 +87,14 @@ export default function ConnectScreen({ navigation, route }: any) {
     if (ws.status === 'disconnected') {
       const last = await StorageService.getLastConnection();
       if (last) {
+        // Skip auto-reconnect for stale tunnel URLs — cloudflare quick tunnels
+        // generate a new random URL each time, so saved wss:// URLs are almost
+        // certainly dead. Force user to scan a fresh QR code instead.
+        const isStaleTunnel = last.url.startsWith('wss://') && last.url.includes('trycloudflare.com');
+        if (isStaleTunnel) {
+          console.log('Skipping auto-reconnect: saved tunnel URL is likely stale');
+          return;
+        }
         handleConnect(last.url, last.token, last.localUrl);
       }
     } else if (ws.status === 'connected') {
@@ -164,7 +175,7 @@ export default function ConnectScreen({ navigation, route }: any) {
 
     if (hasBothUrls) {
       // Local-first strategy: try the LAN address first (faster, lower latency)
-      setConnectionAttempt('Trying local network…');
+      setConnectionAttempt(`Trying local network (${fallbackLocalUrl})…`);
       ws.connect(fallbackLocalUrl, authToken, fallbackLocalUrl, primaryUrl);
 
       // If local doesn't connect within 3 seconds, fall back to tunnel
@@ -172,7 +183,7 @@ export default function ConnectScreen({ navigation, route }: any) {
         if (!isConnectedRef.current) {
           console.log('Local connection timed out after 3s, falling back to tunnel');
           ws.disconnect();
-          setConnectionAttempt('Local failed — trying tunnel…');
+          setConnectionAttempt(`Local failed — trying tunnel…`);
           ws.connect(primaryUrl, authToken, fallbackLocalUrl, primaryUrl);
         }
       }, 3000);
@@ -181,17 +192,18 @@ export default function ConnectScreen({ navigation, route }: any) {
       totalTimeoutRef.current = setTimeout(() => {
         if (!isConnectedRef.current) {
           abortConnection(
-            'Could not reach the VS Code extension.\n\n' +
-            '• Make sure the extension is running (F5 in VS Code)\n' +
-            '• Run "PocketPilot: Start Server" command\n' +
-            '• If not on the same Wi-Fi, enable tunnel in VS Code'
+            `Could not reach the VS Code extension.\n\n` +
+            `Tried: ${fallbackLocalUrl} → ${primaryUrl}\n\n` +
+            `• Scan a fresh QR code from VS Code\n` +
+            `• Make sure the extension is running\n` +
+            `• Enable tunnel if not on the same Wi-Fi`
           );
         }
       }, 15000);
     } else {
       // Single URL — connect directly
       const isTunnel = primaryUrl.startsWith('wss://');
-      setConnectionAttempt(isTunnel ? 'Connecting via tunnel…' : 'Connecting…');
+      setConnectionAttempt(isTunnel ? `Connecting via tunnel…` : `Connecting to ${primaryUrl}…`);
       ws.connect(primaryUrl, authToken);
 
       // Total timeout: give up after 10s
@@ -199,12 +211,11 @@ export default function ConnectScreen({ navigation, route }: any) {
         if (!isConnectedRef.current) {
           abortConnection(
             isTunnel
-              ? 'Tunnel connection failed.\n\n• Make sure the tunnel is still active in VS Code\n• Try scanning a fresh QR code'
-              : 'Could not reach the VS Code extension.\n\n' +
-                '• Make sure the extension is running (F5 in VS Code)\n' +
-                '• Run "PocketPilot: Start Server" command\n' +
-                '• Your phone must be on the same Wi-Fi as your computer\n' +
-                '• Or enable tunnel in VS Code for remote access'
+              ? `Tunnel connection failed.\n\nTried: ${primaryUrl}\n\n• Tunnel URLs expire on restart — scan a fresh QR code`
+              : `Could not reach the VS Code extension.\n\n` +
+                `Tried: ${primaryUrl}\n\n` +
+                `• Your phone must be on the same Wi-Fi as your computer\n` +
+                `• Or enable tunnel in VS Code and scan a new QR code`
           );
         }
       }, 10000);

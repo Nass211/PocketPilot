@@ -11935,8 +11935,20 @@ class SessionManager extends events__WEBPACK_IMPORTED_MODULE_4__.EventEmitter {
         }));
         // Session errors
         this.eventUnsubs.push(session.on('session.error', (event) => {
+            const message = event.data.message ?? '';
+            // Model-unavailable errors are auto-recovered by sendPrompt() retry logic.
+            // Don't forward them to the phone — just reset and let the retry handle it.
+            if (this.isModelUnavailableError({ message })) {
+                this._currentModel = 'auto';
+                this.savePreferences();
+                this.emit('model_switched', 'auto');
+                // Destroy the stale session so ensureSession() creates a fresh one
+                this.destroySession().catch(() => { });
+                this.context.globalState.update('pocketpilot.sessionId', undefined);
+                return;
+            }
             this.isBusy = false;
-            this.emit('error', 'SESSION_ERROR', event.data.message);
+            this.emit('error', 'SESSION_ERROR', message);
         }));
         // Tool execution status (forward as notifications)
         this.eventUnsubs.push(session.on('tool.execution_start', (event) => {

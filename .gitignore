@@ -25,3 +25,37 @@ Thumbs.db
 !.vscode/tasks.json
 !.vscode/settings.json
 !.vscode/extensions.json
+
+
+.DS_Store
+Thumbs.db
+
+# Optional: Keep these but ignore other .vscode contents
+.vscode/*
+!.vscode/launch.json
+!.vscode/tasks.json
+!.vscode/settings.json
+!.vscode/extensions.json
+
+
+.DS_Store
+Thumbs.db
+
+.DS_Store
+Thumbs.db
+
+# Optional: Keep these but ignore other .vscode contents
+.vscode/*
+!.vscode/launch.json
+!.vscode/tasks.json
+!.vscode/settings.json
+!.vscode/extensions.json
+# asdasd
+
+# Optional: Keep these but ignore other .vscode contents
+.vscode/*
+!.vscode/launch.json
+!.vscode/tasks.json
+!.vscode/settings.json
+!.vscode/extensions.json
+

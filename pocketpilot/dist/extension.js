@@ -5312,22 +5312,49 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var child_process__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(child_process__WEBPACK_IMPORTED_MODULE_0__);
 /* harmony import */ var events__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(7);
 /* harmony import */ var events__WEBPACK_IMPORTED_MODULE_1___default = /*#__PURE__*/__webpack_require__.n(events__WEBPACK_IMPORTED_MODULE_1__);
+/* harmony import */ var path__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(30);
+/* harmony import */ var path__WEBPACK_IMPORTED_MODULE_2___default = /*#__PURE__*/__webpack_require__.n(path__WEBPACK_IMPORTED_MODULE_2__);
+/* harmony import */ var fs__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(31);
+/* harmony import */ var fs__WEBPACK_IMPORTED_MODULE_3___default = /*#__PURE__*/__webpack_require__.n(fs__WEBPACK_IMPORTED_MODULE_3__);
+
+
 
 
 const TUNNEL_TIMEOUT_MS = 15_000;
 class TunnelManager extends events__WEBPACK_IMPORTED_MODULE_1__.EventEmitter {
     process = null;
     _tunnelUrl = null;
+    extensionRoot;
+    constructor(extensionRoot) {
+        super();
+        this.extensionRoot = extensionRoot;
+    }
     get tunnelUrl() {
         return this._tunnelUrl;
     }
     get isRunning() {
         return this.process !== null && !this.process.killed;
     }
-    /** Check if cloudflared is installed. */
+    /**
+     * Resolve the cloudflared binary path.
+     * 1. Check for a bundled binary next to the extension (e.g. pocketpilot/cloudflared)
+     * 2. Fall back to the system PATH
+     */
+    getCloudflaredPath() {
+        // Check for bundled binary in the extension root directory
+        const bundledName = process.platform === 'win32' ? 'cloudflared.exe' : 'cloudflared';
+        const bundledPath = path__WEBPACK_IMPORTED_MODULE_2__.join(this.extensionRoot, bundledName);
+        if (fs__WEBPACK_IMPORTED_MODULE_3__.existsSync(bundledPath)) {
+            return bundledPath;
+        }
+        // Fall back to system PATH
+        return 'cloudflared';
+    }
+    /** Check if cloudflared is installed (bundled or system). */
     async checkInstalled() {
         return new Promise((resolve) => {
-            const proc = (0,child_process__WEBPACK_IMPORTED_MODULE_0__.spawn)('cloudflared', ['--version']);
+            const bin = this.getCloudflaredPath();
+            const proc = (0,child_process__WEBPACK_IMPORTED_MODULE_0__.spawn)(bin, ['--version']);
             proc.on('error', () => resolve(false));
             proc.on('close', (code) => resolve(code === 0));
         });
@@ -5340,8 +5367,9 @@ class TunnelManager extends events__WEBPACK_IMPORTED_MODULE_1__.EventEmitter {
             }
             this.stop();
         }
+        const bin = this.getCloudflaredPath();
         return new Promise((resolve, reject) => {
-            this.process = (0,child_process__WEBPACK_IMPORTED_MODULE_0__.spawn)('cloudflared', [
+            this.process = (0,child_process__WEBPACK_IMPORTED_MODULE_0__.spawn)(bin, [
                 'tunnel', '--url', `http://localhost:${port}`,
             ]);
             const timeout = setTimeout(() => {
@@ -5390,6 +5418,20 @@ module.exports = require("child_process");
 
 /***/ }),
 /* 30 */
+/***/ ((module) => {
+
+"use strict";
+module.exports = require("path");
+
+/***/ }),
+/* 31 */
+/***/ ((module) => {
+
+"use strict";
+module.exports = require("fs");
+
+/***/ }),
+/* 32 */
 /***/ ((__unused_webpack_module, __webpack_exports__, __webpack_require__) => {
 
 "use strict";
@@ -5399,9 +5441,9 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ });
 /* harmony import */ var vscode__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(1);
 /* harmony import */ var vscode__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(vscode__WEBPACK_IMPORTED_MODULE_0__);
-/* harmony import */ var os__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(31);
+/* harmony import */ var os__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(33);
 /* harmony import */ var os__WEBPACK_IMPORTED_MODULE_1___default = /*#__PURE__*/__webpack_require__.n(os__WEBPACK_IMPORTED_MODULE_1__);
-/* harmony import */ var qrcode__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(32);
+/* harmony import */ var qrcode__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(34);
 
 
 
@@ -5492,14 +5534,14 @@ function getLocalIP() {
 
 
 /***/ }),
-/* 31 */
+/* 33 */
 /***/ ((module) => {
 
 "use strict";
 module.exports = require("os");
 
 /***/ }),
-/* 32 */
+/* 34 */
 /***/ ((module, __unused_webpack_exports, __webpack_require__) => {
 
 /*
@@ -5513,19 +5555,19 @@ module.exports = require("os");
 *
 */
 
-module.exports = __webpack_require__(33)
+module.exports = __webpack_require__(35)
 
 
 /***/ }),
-/* 33 */
+/* 35 */
 /***/ ((__unused_webpack_module, exports, __webpack_require__) => {
 
-const canPromise = __webpack_require__(34)
-const QRCode = __webpack_require__(35)
-const PngRenderer = __webpack_require__(58)
-const Utf8Renderer = __webpack_require__(85)
-const TerminalRenderer = __webpack_require__(86)
-const SvgRenderer = __webpack_require__(89)
+const canPromise = __webpack_require__(36)
+const QRCode = __webpack_require__(37)
+const PngRenderer = __webpack_require__(60)
+const Utf8Renderer = __webpack_require__(86)
+const TerminalRenderer = __webpack_require__(87)
+const SvgRenderer = __webpack_require__(90)
 
 function checkParams (text, opts, cb) {
   if (typeof text === 'undefined') {
@@ -5610,7 +5652,7 @@ function render (renderFunc, text, params) {
 
 exports.create = QRCode.create
 
-exports.toCanvas = __webpack_require__(91).toCanvas
+exports.toCanvas = __webpack_require__(92).toCanvas
 
 exports.toString = function toString (text, opts, cb) {
   const params = checkParams(text, opts, cb)
@@ -5661,7 +5703,7 @@ exports.toFileStream = function toFileStream (stream, text, opts) {
 
 
 /***/ }),
-/* 34 */
+/* 36 */
 /***/ ((module) => {
 
 // can-promise has a crash in some versions of react native that dont have
@@ -5674,22 +5716,22 @@ module.exports = function () {
 
 
 /***/ }),
-/* 35 */
+/* 37 */
 /***/ ((__unused_webpack_module, exports, __webpack_require__) => {
 
-const Utils = __webpack_require__(36)
-const ECLevel = __webpack_require__(37)
-const BitBuffer = __webpack_require__(38)
-const BitMatrix = __webpack_require__(39)
-const AlignmentPattern = __webpack_require__(40)
-const FinderPattern = __webpack_require__(41)
-const MaskPattern = __webpack_require__(42)
-const ECCode = __webpack_require__(43)
-const ReedSolomonEncoder = __webpack_require__(44)
-const Version = __webpack_require__(47)
-const FormatInfo = __webpack_require__(51)
-const Mode = __webpack_require__(48)
-const Segments = __webpack_require__(52)
+const Utils = __webpack_require__(38)
+const ECLevel = __webpack_require__(39)
+const BitBuffer = __webpack_require__(40)
+const BitMatrix = __webpack_require__(41)
+const AlignmentPattern = __webpack_require__(42)
+const FinderPattern = __webpack_require__(43)
+const MaskPattern = __webpack_require__(44)
+const ECCode = __webpack_require__(45)
+const ReedSolomonEncoder = __webpack_require__(46)
+const Version = __webpack_require__(49)
+const FormatInfo = __webpack_require__(53)
+const Mode = __webpack_require__(50)
+const Segments = __webpack_require__(54)
 
 /**
  * QRCode for JavaScript
@@ -6175,7 +6217,7 @@ exports.create = function create (data, options) {
 
 
 /***/ }),
-/* 36 */
+/* 38 */
 /***/ ((__unused_webpack_module, exports) => {
 
 let toSJISFunction
@@ -6244,7 +6286,7 @@ exports.toSJIS = function toSJIS (kanji) {
 
 
 /***/ }),
-/* 37 */
+/* 39 */
 /***/ ((__unused_webpack_module, exports) => {
 
 exports.L = { bit: 1 }
@@ -6300,7 +6342,7 @@ exports.from = function from (value, defaultValue) {
 
 
 /***/ }),
-/* 38 */
+/* 40 */
 /***/ ((module) => {
 
 function BitBuffer () {
@@ -6343,7 +6385,7 @@ module.exports = BitBuffer
 
 
 /***/ }),
-/* 39 */
+/* 41 */
 /***/ ((module) => {
 
 /**
@@ -6414,7 +6456,7 @@ module.exports = BitMatrix
 
 
 /***/ }),
-/* 40 */
+/* 42 */
 /***/ ((__unused_webpack_module, exports, __webpack_require__) => {
 
 /**
@@ -6427,7 +6469,7 @@ module.exports = BitMatrix
  * and their number depends on the symbol version.
  */
 
-const getSymbolSize = (__webpack_require__(36).getSymbolSize)
+const getSymbolSize = (__webpack_require__(38).getSymbolSize)
 
 /**
  * Calculate the row/column coordinates of the center module of each alignment pattern
@@ -6503,10 +6545,10 @@ exports.getPositions = function getPositions (version) {
 
 
 /***/ }),
-/* 41 */
+/* 43 */
 /***/ ((__unused_webpack_module, exports, __webpack_require__) => {
 
-const getSymbolSize = (__webpack_require__(36).getSymbolSize)
+const getSymbolSize = (__webpack_require__(38).getSymbolSize)
 const FINDER_PATTERN_SIZE = 7
 
 /**
@@ -6531,7 +6573,7 @@ exports.getPositions = function getPositions (version) {
 
 
 /***/ }),
-/* 42 */
+/* 44 */
 /***/ ((__unused_webpack_module, exports) => {
 
 /**
@@ -6771,10 +6813,10 @@ exports.getBestMask = function getBestMask (data, setupFormatFunc) {
 
 
 /***/ }),
-/* 43 */
+/* 45 */
 /***/ ((__unused_webpack_module, exports, __webpack_require__) => {
 
-const ECLevel = __webpack_require__(37)
+const ECLevel = __webpack_require__(39)
 
 const EC_BLOCKS_TABLE = [
 // L  M  Q  H
@@ -6912,10 +6954,10 @@ exports.getTotalCodewordsCount = function getTotalCodewordsCount (version, error
 
 
 /***/ }),
-/* 44 */
+/* 46 */
 /***/ ((module, __unused_webpack_exports, __webpack_require__) => {
 
-const Polynomial = __webpack_require__(45)
+const Polynomial = __webpack_require__(47)
 
 function ReedSolomonEncoder (degree) {
   this.genPoly = undefined
@@ -6974,10 +7016,10 @@ module.exports = ReedSolomonEncoder
 
 
 /***/ }),
-/* 45 */
+/* 47 */
 /***/ ((__unused_webpack_module, exports, __webpack_require__) => {
 
-const GF = __webpack_require__(46)
+const GF = __webpack_require__(48)
 
 /**
  * Multiplies two polynomials inside Galois Field
@@ -7042,7 +7084,7 @@ exports.generateECPolynomial = function generateECPolynomial (degree) {
 
 
 /***/ }),
-/* 46 */
+/* 48 */
 /***/ ((__unused_webpack_module, exports) => {
 
 const EXP_TABLE = new Uint8Array(512)
@@ -7117,14 +7159,14 @@ exports.mul = function mul (x, y) {
 
 
 /***/ }),
-/* 47 */
+/* 49 */
 /***/ ((__unused_webpack_module, exports, __webpack_require__) => {
 
-const Utils = __webpack_require__(36)
-const ECCode = __webpack_require__(43)
-const ECLevel = __webpack_require__(37)
-const Mode = __webpack_require__(48)
-const VersionCheck = __webpack_require__(49)
+const Utils = __webpack_require__(38)
+const ECCode = __webpack_require__(45)
+const ECLevel = __webpack_require__(39)
+const Mode = __webpack_require__(50)
+const VersionCheck = __webpack_require__(51)
 
 // Generator polynomial used to encode version information
 const G18 = (1 << 12) | (1 << 11) | (1 << 10) | (1 << 9) | (1 << 8) | (1 << 5) | (1 << 2) | (1 << 0)
@@ -7286,11 +7328,11 @@ exports.getEncodedBits = function getEncodedBits (version) {
 
 
 /***/ }),
-/* 48 */
+/* 50 */
 /***/ ((__unused_webpack_module, exports, __webpack_require__) => {
 
-const VersionCheck = __webpack_require__(49)
-const Regex = __webpack_require__(50)
+const VersionCheck = __webpack_require__(51)
+const Regex = __webpack_require__(52)
 
 /**
  * Numeric mode encodes data from the decimal digit set (0 - 9)
@@ -7459,7 +7501,7 @@ exports.from = function from (value, defaultValue) {
 
 
 /***/ }),
-/* 49 */
+/* 51 */
 /***/ ((__unused_webpack_module, exports) => {
 
 /**
@@ -7474,7 +7516,7 @@ exports.isValid = function isValid (version) {
 
 
 /***/ }),
-/* 50 */
+/* 52 */
 /***/ ((__unused_webpack_module, exports) => {
 
 const numeric = '[0-9]+'
@@ -7511,10 +7553,10 @@ exports.testAlphanumeric = function testAlphanumeric (str) {
 
 
 /***/ }),
-/* 51 */
+/* 53 */
 /***/ ((__unused_webpack_module, exports, __webpack_require__) => {
 
-const Utils = __webpack_require__(36)
+const Utils = __webpack_require__(38)
 
 const G15 = (1 << 10) | (1 << 8) | (1 << 5) | (1 << 4) | (1 << 2) | (1 << 1) | (1 << 0)
 const G15_MASK = (1 << 14) | (1 << 12) | (1 << 10) | (1 << 4) | (1 << 1)
@@ -7546,17 +7588,17 @@ exports.getEncodedBits = function getEncodedBits (errorCorrectionLevel, mask) {
 
 
 /***/ }),
-/* 52 */
+/* 54 */
 /***/ ((__unused_webpack_module, exports, __webpack_require__) => {
 
-const Mode = __webpack_require__(48)
-const NumericData = __webpack_require__(53)
-const AlphanumericData = __webpack_require__(54)
-const ByteData = __webpack_require__(55)
-const KanjiData = __webpack_require__(56)
-const Regex = __webpack_require__(50)
-const Utils = __webpack_require__(36)
-const dijkstra = __webpack_require__(57)
+const Mode = __webpack_require__(50)
+const NumericData = __webpack_require__(55)
+const AlphanumericData = __webpack_require__(56)
+const ByteData = __webpack_require__(57)
+const KanjiData = __webpack_require__(58)
+const Regex = __webpack_require__(52)
+const Utils = __webpack_require__(38)
+const dijkstra = __webpack_require__(59)
 
 /**
  * Returns UTF8 byte length
@@ -7882,10 +7924,10 @@ exports.rawSplit = function rawSplit (data) {
 
 
 /***/ }),
-/* 53 */
+/* 55 */
 /***/ ((module, __unused_webpack_exports, __webpack_require__) => {
 
-const Mode = __webpack_require__(48)
+const Mode = __webpack_require__(50)
 
 function NumericData (data) {
   this.mode = Mode.NUMERIC
@@ -7931,10 +7973,10 @@ module.exports = NumericData
 
 
 /***/ }),
-/* 54 */
+/* 56 */
 /***/ ((module, __unused_webpack_exports, __webpack_require__) => {
 
-const Mode = __webpack_require__(48)
+const Mode = __webpack_require__(50)
 
 /**
  * Array of characters available in alphanumeric mode
@@ -7996,10 +8038,10 @@ module.exports = AlphanumericData
 
 
 /***/ }),
-/* 55 */
+/* 57 */
 /***/ ((module, __unused_webpack_exports, __webpack_require__) => {
 
-const Mode = __webpack_require__(48)
+const Mode = __webpack_require__(50)
 
 function ByteData (data) {
   this.mode = Mode.BYTE
@@ -8032,11 +8074,11 @@ module.exports = ByteData
 
 
 /***/ }),
-/* 56 */
+/* 58 */
 /***/ ((module, __unused_webpack_exports, __webpack_require__) => {
 
-const Mode = __webpack_require__(48)
-const Utils = __webpack_require__(36)
+const Mode = __webpack_require__(50)
+const Utils = __webpack_require__(38)
 
 function KanjiData (data) {
   this.mode = Mode.KANJI
@@ -8092,7 +8134,7 @@ module.exports = KanjiData
 
 
 /***/ }),
-/* 57 */
+/* 59 */
 /***/ ((module) => {
 
 "use strict";
@@ -8264,12 +8306,12 @@ if (true) {
 
 
 /***/ }),
-/* 58 */
+/* 60 */
 /***/ ((__unused_webpack_module, exports, __webpack_require__) => {
 
-const fs = __webpack_require__(59)
-const PNG = (__webpack_require__(60).PNG)
-const Utils = __webpack_require__(84)
+const fs = __webpack_require__(31)
+const PNG = (__webpack_require__(61).PNG)
+const Utils = __webpack_require__(85)
 
 exports.render = function render (qrData, options) {
   const opts = Utils.getOptions(options)
@@ -8348,24 +8390,17 @@ exports.renderToFileStream = function renderToFileStream (stream, qrData, option
 
 
 /***/ }),
-/* 59 */
-/***/ ((module) => {
-
-"use strict";
-module.exports = require("fs");
-
-/***/ }),
-/* 60 */
+/* 61 */
 /***/ ((__unused_webpack_module, exports, __webpack_require__) => {
 
 "use strict";
 
 
-let util = __webpack_require__(61);
+let util = __webpack_require__(62);
 let Stream = __webpack_require__(12);
-let Parser = __webpack_require__(62);
-let Packer = __webpack_require__(73);
-let PNGSync = __webpack_require__(77);
+let Parser = __webpack_require__(63);
+let Packer = __webpack_require__(74);
+let PNGSync = __webpack_require__(78);
 
 let PNG = (exports.PNG = function (options) {
   Stream.call(this);
@@ -8556,26 +8591,26 @@ PNG.prototype.adjustGamma = function () {
 
 
 /***/ }),
-/* 61 */
+/* 62 */
 /***/ ((module) => {
 
 "use strict";
 module.exports = require("util");
 
 /***/ }),
-/* 62 */
+/* 63 */
 /***/ ((module, __unused_webpack_exports, __webpack_require__) => {
 
 "use strict";
 
 
-let util = __webpack_require__(61);
+let util = __webpack_require__(62);
 let zlib = __webpack_require__(15);
-let ChunkStream = __webpack_require__(63);
-let FilterAsync = __webpack_require__(64);
-let Parser = __webpack_require__(68);
-let bitmapper = __webpack_require__(71);
-let formatNormaliser = __webpack_require__(72);
+let ChunkStream = __webpack_require__(64);
+let FilterAsync = __webpack_require__(65);
+let Parser = __webpack_require__(69);
+let bitmapper = __webpack_require__(72);
+let formatNormaliser = __webpack_require__(73);
 
 let ParserAsync = (module.exports = function (options) {
   ChunkStream.call(this);
@@ -8735,13 +8770,13 @@ ParserAsync.prototype._complete = function (filteredData) {
 
 
 /***/ }),
-/* 63 */
+/* 64 */
 /***/ ((module, __unused_webpack_exports, __webpack_require__) => {
 
 "use strict";
 
 
-let util = __webpack_require__(61);
+let util = __webpack_require__(62);
 let Stream = __webpack_require__(12);
 
 let ChunkStream = (module.exports = function () {
@@ -8931,15 +8966,15 @@ ChunkStream.prototype._process = function () {
 
 
 /***/ }),
-/* 64 */
+/* 65 */
 /***/ ((module, __unused_webpack_exports, __webpack_require__) => {
 
 "use strict";
 
 
-let util = __webpack_require__(61);
-let ChunkStream = __webpack_require__(63);
-let Filter = __webpack_require__(65);
+let util = __webpack_require__(62);
+let ChunkStream = __webpack_require__(64);
+let Filter = __webpack_require__(66);
 
 let FilterAsync = (module.exports = function (bitmapInfo) {
   ChunkStream.call(this);
@@ -8962,14 +8997,14 @@ util.inherits(FilterAsync, ChunkStream);
 
 
 /***/ }),
-/* 65 */
+/* 66 */
 /***/ ((module, __unused_webpack_exports, __webpack_require__) => {
 
 "use strict";
 
 
-let interlaceUtils = __webpack_require__(66);
-let paethPredictor = __webpack_require__(67);
+let interlaceUtils = __webpack_require__(67);
+let paethPredictor = __webpack_require__(68);
 
 function getByteWidth(width, bpp, depth) {
   let byteWidth = width * bpp;
@@ -9146,7 +9181,7 @@ Filter.prototype._reverseFilterLine = function (rawData) {
 
 
 /***/ }),
-/* 66 */
+/* 67 */
 /***/ ((__unused_webpack_module, exports) => {
 
 "use strict";
@@ -9248,7 +9283,7 @@ exports.getInterlaceIterator = function (width) {
 
 
 /***/ }),
-/* 67 */
+/* 68 */
 /***/ ((module) => {
 
 "use strict";
@@ -9271,14 +9306,14 @@ module.exports = function paethPredictor(left, above, upLeft) {
 
 
 /***/ }),
-/* 68 */
+/* 69 */
 /***/ ((module, __unused_webpack_exports, __webpack_require__) => {
 
 "use strict";
 
 
-let constants = __webpack_require__(69);
-let CrcCalculator = __webpack_require__(70);
+let constants = __webpack_require__(70);
+let CrcCalculator = __webpack_require__(71);
 
 let Parser = (module.exports = function (options, dependencies) {
   this._options = options;
@@ -9568,7 +9603,7 @@ Parser.prototype._parseIEND = function (data) {
 
 
 /***/ }),
-/* 69 */
+/* 70 */
 /***/ ((module) => {
 
 "use strict";
@@ -9607,7 +9642,7 @@ module.exports = {
 
 
 /***/ }),
-/* 70 */
+/* 71 */
 /***/ ((module) => {
 
 "use strict";
@@ -9654,13 +9689,13 @@ CrcCalculator.crc32 = function (buf) {
 
 
 /***/ }),
-/* 71 */
+/* 72 */
 /***/ ((__unused_webpack_module, exports, __webpack_require__) => {
 
 "use strict";
 
 
-let interlaceUtils = __webpack_require__(66);
+let interlaceUtils = __webpack_require__(67);
 
 let pixelBppMapper = [
   // 0 - dummy entry
@@ -9928,7 +9963,7 @@ exports.dataToBitMap = function (data, bitmapInfo) {
 
 
 /***/ }),
-/* 72 */
+/* 73 */
 /***/ ((module) => {
 
 "use strict";
@@ -10028,16 +10063,16 @@ module.exports = function (indata, imageData) {
 
 
 /***/ }),
-/* 73 */
+/* 74 */
 /***/ ((module, __unused_webpack_exports, __webpack_require__) => {
 
 "use strict";
 
 
-let util = __webpack_require__(61);
+let util = __webpack_require__(62);
 let Stream = __webpack_require__(12);
-let constants = __webpack_require__(69);
-let Packer = __webpack_require__(74);
+let constants = __webpack_require__(70);
+let Packer = __webpack_require__(75);
 
 let PackerAsync = (module.exports = function (opt) {
   Stream.call(this);
@@ -10085,16 +10120,16 @@ PackerAsync.prototype.pack = function (data, width, height, gamma) {
 
 
 /***/ }),
-/* 74 */
+/* 75 */
 /***/ ((module, __unused_webpack_exports, __webpack_require__) => {
 
 "use strict";
 
 
-let constants = __webpack_require__(69);
-let CrcStream = __webpack_require__(70);
-let bitPacker = __webpack_require__(75);
-let filter = __webpack_require__(76);
+let constants = __webpack_require__(70);
+let CrcStream = __webpack_require__(71);
+let bitPacker = __webpack_require__(76);
+let filter = __webpack_require__(77);
 let zlib = __webpack_require__(15);
 
 let Packer = (module.exports = function (options) {
@@ -10221,13 +10256,13 @@ Packer.prototype.packIEND = function () {
 
 
 /***/ }),
-/* 75 */
+/* 76 */
 /***/ ((module, __unused_webpack_exports, __webpack_require__) => {
 
 "use strict";
 
 
-let constants = __webpack_require__(69);
+let constants = __webpack_require__(70);
 
 module.exports = function (dataIn, width, height, options) {
   let outHasAlpha =
@@ -10386,13 +10421,13 @@ module.exports = function (dataIn, width, height, options) {
 
 
 /***/ }),
-/* 76 */
+/* 77 */
 /***/ ((module, __unused_webpack_exports, __webpack_require__) => {
 
 "use strict";
 
 
-let paethPredictor = __webpack_require__(67);
+let paethPredictor = __webpack_require__(68);
 
 function filterNone(pxData, pxPos, byteWidth, rawData, rawPos) {
   for (let x = 0; x < byteWidth; x++) {
@@ -10564,14 +10599,14 @@ module.exports = function (pxData, width, height, options, bpp) {
 
 
 /***/ }),
-/* 77 */
+/* 78 */
 /***/ ((__unused_webpack_module, exports, __webpack_require__) => {
 
 "use strict";
 
 
-let parse = __webpack_require__(78);
-let pack = __webpack_require__(83);
+let parse = __webpack_require__(79);
+let pack = __webpack_require__(84);
 
 exports.read = function (buffer, options) {
   return parse(buffer, options || {});
@@ -10583,7 +10618,7 @@ exports.write = function (png, options) {
 
 
 /***/ }),
-/* 78 */
+/* 79 */
 /***/ ((module, __unused_webpack_exports, __webpack_require__) => {
 
 "use strict";
@@ -10591,15 +10626,15 @@ exports.write = function (png, options) {
 
 let hasSyncZlib = true;
 let zlib = __webpack_require__(15);
-let inflateSync = __webpack_require__(79);
+let inflateSync = __webpack_require__(80);
 if (!zlib.deflateSync) {
   hasSyncZlib = false;
 }
-let SyncReader = __webpack_require__(81);
-let FilterSync = __webpack_require__(82);
-let Parser = __webpack_require__(68);
-let bitmapper = __webpack_require__(71);
-let formatNormaliser = __webpack_require__(72);
+let SyncReader = __webpack_require__(82);
+let FilterSync = __webpack_require__(83);
+let Parser = __webpack_require__(69);
+let bitmapper = __webpack_require__(72);
+let formatNormaliser = __webpack_require__(73);
 
 module.exports = function (buffer, options) {
   if (!hasSyncZlib) {
@@ -10698,15 +10733,15 @@ module.exports = function (buffer, options) {
 
 
 /***/ }),
-/* 79 */
+/* 80 */
 /***/ ((module, exports, __webpack_require__) => {
 
 "use strict";
 
 
-let assert = (__webpack_require__(80).ok);
+let assert = (__webpack_require__(81).ok);
 let zlib = __webpack_require__(15);
-let util = __webpack_require__(61);
+let util = __webpack_require__(62);
 
 let kMaxLength = (__webpack_require__(21).kMaxLength);
 
@@ -10873,14 +10908,14 @@ exports.inflateSync = inflateSync;
 
 
 /***/ }),
-/* 80 */
+/* 81 */
 /***/ ((module) => {
 
 "use strict";
 module.exports = require("assert");
 
 /***/ }),
-/* 81 */
+/* 82 */
 /***/ ((module) => {
 
 "use strict";
@@ -10932,14 +10967,14 @@ SyncReader.prototype.process = function () {
 
 
 /***/ }),
-/* 82 */
+/* 83 */
 /***/ ((__unused_webpack_module, exports, __webpack_require__) => {
 
 "use strict";
 
 
-let SyncReader = __webpack_require__(81);
-let Filter = __webpack_require__(65);
+let SyncReader = __webpack_require__(82);
+let Filter = __webpack_require__(66);
 
 exports.process = function (inBuffer, bitmapInfo) {
   let outBuffers = [];
@@ -10960,7 +10995,7 @@ exports.process = function (inBuffer, bitmapInfo) {
 
 
 /***/ }),
-/* 83 */
+/* 84 */
 /***/ ((module, __unused_webpack_exports, __webpack_require__) => {
 
 "use strict";
@@ -10971,8 +11006,8 @@ let zlib = __webpack_require__(15);
 if (!zlib.deflateSync) {
   hasSyncZlib = false;
 }
-let constants = __webpack_require__(69);
-let Packer = __webpack_require__(74);
+let constants = __webpack_require__(70);
+let Packer = __webpack_require__(75);
 
 module.exports = function (metaData, opt) {
   if (!hasSyncZlib) {
@@ -11023,7 +11058,7 @@ module.exports = function (metaData, opt) {
 
 
 /***/ }),
-/* 84 */
+/* 85 */
 /***/ ((__unused_webpack_module, exports) => {
 
 function hex2rgba (hex) {
@@ -11128,10 +11163,10 @@ exports.qrToImageData = function qrToImageData (imgData, qr, opts) {
 
 
 /***/ }),
-/* 85 */
+/* 86 */
 /***/ ((__unused_webpack_module, exports, __webpack_require__) => {
 
-const Utils = __webpack_require__(84)
+const Utils = __webpack_require__(85)
 
 const BLOCK_CHAR = {
   WW: ' ',
@@ -11198,18 +11233,18 @@ exports.renderToFile = function renderToFile (path, qrData, options, cb) {
     options = undefined
   }
 
-  const fs = __webpack_require__(59)
+  const fs = __webpack_require__(31)
   const utf8 = exports.render(qrData, options)
   fs.writeFile(path, utf8, cb)
 }
 
 
 /***/ }),
-/* 86 */
+/* 87 */
 /***/ ((__unused_webpack_module, exports, __webpack_require__) => {
 
-const big = __webpack_require__(87)
-const small = __webpack_require__(88)
+const big = __webpack_require__(88)
+const small = __webpack_require__(89)
 
 exports.render = function (qrData, options, cb) {
   if (options && options.small) {
@@ -11220,7 +11255,7 @@ exports.render = function (qrData, options, cb) {
 
 
 /***/ }),
-/* 87 */
+/* 88 */
 /***/ ((__unused_webpack_module, exports) => {
 
 // let Utils = require('./utils')
@@ -11275,7 +11310,7 @@ exports.renderToFile = function renderToFile (path, qrData, options, cb) {
 
 
 /***/ }),
-/* 88 */
+/* 89 */
 /***/ ((__unused_webpack_module, exports) => {
 
 const backgroundWhite = '\x1b[47m'
@@ -11366,10 +11401,10 @@ exports.render = function (qrData, options, cb) {
 
 
 /***/ }),
-/* 89 */
+/* 90 */
 /***/ ((__unused_webpack_module, exports, __webpack_require__) => {
 
-const svgTagRenderer = __webpack_require__(90)
+const svgTagRenderer = __webpack_require__(91)
 
 exports.render = svgTagRenderer.render
 
@@ -11379,7 +11414,7 @@ exports.renderToFile = function renderToFile (path, qrData, options, cb) {
     options = undefined
   }
 
-  const fs = __webpack_require__(59)
+  const fs = __webpack_require__(31)
   const svgTag = exports.render(qrData, options)
 
   const xmlStr = '<?xml version="1.0" encoding="utf-8"?>' +
@@ -11391,10 +11426,10 @@ exports.renderToFile = function renderToFile (path, qrData, options, cb) {
 
 
 /***/ }),
-/* 90 */
+/* 91 */
 /***/ ((__unused_webpack_module, exports, __webpack_require__) => {
 
-const Utils = __webpack_require__(84)
+const Utils = __webpack_require__(85)
 
 function getColorAttrib (color, attrib) {
   const alpha = color.a / 255
@@ -11478,15 +11513,15 @@ exports.render = function render (qrData, options, cb) {
 
 
 /***/ }),
-/* 91 */
+/* 92 */
 /***/ ((__unused_webpack_module, exports, __webpack_require__) => {
 
 
-const canPromise = __webpack_require__(34)
+const canPromise = __webpack_require__(36)
 
-const QRCode = __webpack_require__(35)
-const CanvasRenderer = __webpack_require__(92)
-const SvgRenderer = __webpack_require__(90)
+const QRCode = __webpack_require__(37)
+const CanvasRenderer = __webpack_require__(93)
+const SvgRenderer = __webpack_require__(91)
 
 function renderCanvas (renderFunc, canvas, text, opts, cb) {
   const args = [].slice.call(arguments, 1)
@@ -11560,10 +11595,10 @@ exports.toString = renderCanvas.bind(null, function (data, _, opts) {
 
 
 /***/ }),
-/* 92 */
+/* 93 */
 /***/ ((__unused_webpack_module, exports, __webpack_require__) => {
 
-const Utils = __webpack_require__(84)
+const Utils = __webpack_require__(85)
 
 function clearCanvas (ctx, canvas, size) {
   ctx.clearRect(0, 0, canvas.width, canvas.height)
@@ -11629,7 +11664,7 @@ exports.renderToDataURL = function renderToDataURL (qrData, canvas, options) {
 
 
 /***/ }),
-/* 93 */
+/* 94 */
 /***/ ((__unused_webpack_module, __webpack_exports__, __webpack_require__) => {
 
 "use strict";
@@ -11641,9 +11676,9 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var vscode__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(vscode__WEBPACK_IMPORTED_MODULE_0__);
 /* harmony import */ var child_process__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(29);
 /* harmony import */ var child_process__WEBPACK_IMPORTED_MODULE_1___default = /*#__PURE__*/__webpack_require__.n(child_process__WEBPACK_IMPORTED_MODULE_1__);
-/* harmony import */ var fs__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(59);
+/* harmony import */ var fs__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(31);
 /* harmony import */ var fs__WEBPACK_IMPORTED_MODULE_2___default = /*#__PURE__*/__webpack_require__.n(fs__WEBPACK_IMPORTED_MODULE_2__);
-/* harmony import */ var path__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(94);
+/* harmony import */ var path__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(30);
 /* harmony import */ var path__WEBPACK_IMPORTED_MODULE_3___default = /*#__PURE__*/__webpack_require__.n(path__WEBPACK_IMPORTED_MODULE_3__);
 /* harmony import */ var events__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(7);
 /* harmony import */ var events__WEBPACK_IMPORTED_MODULE_4___default = /*#__PURE__*/__webpack_require__.n(events__WEBPACK_IMPORTED_MODULE_4__);
@@ -12260,13 +12295,6 @@ class SessionManager extends events__WEBPACK_IMPORTED_MODULE_4__.EventEmitter {
 
 
 /***/ }),
-/* 94 */
-/***/ ((module) => {
-
-"use strict";
-module.exports = require("path");
-
-/***/ }),
 /* 95 */
 /***/ ((module) => {
 
@@ -12358,8 +12386,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _WebSocketManager__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(3);
 /* harmony import */ var _StatusBarManager__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(27);
 /* harmony import */ var _TunnelManager__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(28);
-/* harmony import */ var _QRCodePanel__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(30);
-/* harmony import */ var _SessionManager__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(93);
+/* harmony import */ var _QRCodePanel__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(32);
+/* harmony import */ var _SessionManager__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(94);
 
 
 
@@ -12386,7 +12414,7 @@ async function activate(context) {
     outputChannel = vscode__WEBPACK_IMPORTED_MODULE_0__.window.createOutputChannel('PocketPilot');
     statusBar = new _StatusBarManager__WEBPACK_IMPORTED_MODULE_3__.StatusBarManager();
     statusBar.show();
-    tunnelManager = new _TunnelManager__WEBPACK_IMPORTED_MODULE_4__.TunnelManager();
+    tunnelManager = new _TunnelManager__WEBPACK_IMPORTED_MODULE_4__.TunnelManager(context.extensionPath);
     qrPanel = new _QRCodePanel__WEBPACK_IMPORTED_MODULE_5__.QRCodePanel();
     wsManager = new _WebSocketManager__WEBPACK_IMPORTED_MODULE_2__.WebSocketManager(authToken);
     session = new _SessionManager__WEBPACK_IMPORTED_MODULE_6__.SessionManager(context);

@@ -359,6 +359,16 @@ export class SessionManager extends EventEmitter {
                 return;
             }
 
+            // Auth errors: surface a clear message and let sendPrompt's retry logic
+            // attempt interactive re-auth. Suppress SESSION_ERROR here so the phone
+            // doesn't show two separate error bubbles (SESSION_ERROR + REQUEST_FAILED).
+            if (this.isMissingAuthContextError({ message })) {
+                this.isBusy = false;
+                this.emit('error', 'AUTH_REQUIRED',
+                    'GitHub authentication is required. Sign in to GitHub in VS Code and retry.');
+                return;
+            }
+
             this.isBusy = false;
             this.emit('error', 'SESSION_ERROR', message);
         }));

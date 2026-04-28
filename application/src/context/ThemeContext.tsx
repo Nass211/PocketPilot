@@ -10,6 +10,7 @@ export interface ThemeColors {
   textSecondary: string;
   border: string;
   userBubble: string;
+  userText: string;
   assistantBubble: string;
   assistantText: string;
   inputBackground: string;
@@ -22,9 +23,10 @@ const darkColors: ThemeColors = {
   text: '#ffffff',
   textSecondary: '#888888',
   border: '#333333',
-  userBubble: '#0078d4',
-  assistantBubble: '#ffffff',
-  assistantText: '#000000',
+  userBubble: '#000000',
+  userText: '#ffffff',
+  assistantBubble: '#000000',
+  assistantText: '#ffffff',
   inputBackground: '#2d2d2d',
   accent: '#ff6b35',
 };
@@ -35,7 +37,8 @@ const lightColors: ThemeColors = {
   text: '#000000',
   textSecondary: '#666666',
   border: '#dddddd',
-  userBubble: '#0078d4',
+  userBubble: '#ffffff',
+  userText: '#000000',
   assistantBubble: '#ffffff',
   assistantText: '#000000',
   inputBackground: '#eeeeee',

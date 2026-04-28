@@ -10,7 +10,24 @@ interface ModelSelectorProps {
 }
 
 // Fallback models if the extension hasn't sent available models yet
-const FALLBACK_MODELS = ['auto', 'GPT-4o', 'GPT-4.1', 'GPT-4.1-mini', 'claude-sonnet-4', 'o3', 'o4-mini'];
+const FALLBACK_MODELS = [
+  'auto',
+  'gemini-2.5-pro',
+  'gemini-3.1-pro',
+  'gpt-4.1',
+  'gpt-5.3-codex',
+  'claude-haiku-4.5',
+  'gemini-3-flash',
+  'gpt-4o',
+  'gpt-5-mini',
+  'gpt-5.2',
+  'gpt-5.2-codex',
+  'gpt-5.4-mini',
+  'grok-code-fast-1',
+  'raptor-mini',
+];
+
+const isBlockedModel = (model: string) => model.toLowerCase().includes('sonnet');
 
 export default function ModelSelector({ currentModel, onModelChange, availableModels }: ModelSelectorProps) {
   const { colors } = useTheme();
@@ -21,10 +38,10 @@ export default function ModelSelector({ currentModel, onModelChange, availableMo
   const models = useMemo(() => {
     if (availableModels && availableModels.length > 0) {
       // Always include 'auto' at the top, then the available models
-      const ids = availableModels.map(m => m.id);
+      const ids = availableModels.map(m => m.id).filter(id => !isBlockedModel(id));
       return ['auto', ...ids];
     }
-    return FALLBACK_MODELS;
+    return FALLBACK_MODELS.filter(model => !isBlockedModel(model));
   }, [availableModels]);
 
   // Build a display name map for nicer labels
@@ -32,6 +49,7 @@ export default function ModelSelector({ currentModel, onModelChange, availableMo
     const map: Record<string, string> = { auto: 'Auto' };
     if (availableModels) {
       for (const m of availableModels) {
+        if (isBlockedModel(m.id)) continue;
         map[m.id] = m.displayName || m.id;
       }
     }

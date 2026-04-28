@@ -1,6 +1,6 @@
 import React from 'react';
 import { useEffect, useState, useRef, useCallback, useMemo } from 'react';
-import { Message, Mode, WebSocketMessage } from '../types/messages';
+import { Message, MessageAttachment, Mode, WebSocketMessage } from '../types/messages';
 
 export const useChat = (ws?: any) => {
   const [messages, setMessages] = useState<Message[]>([]);
@@ -9,14 +9,16 @@ export const useChat = (ws?: any) => {
   const sendPrompt = useCallback((
     content: string, 
     mode: Mode, 
-    model?: string
+    model?: string,
+    attachments?: MessageAttachment[]
   ) => {
     const userMsg: Message = {
       id: Date.now().toString() + '_user',
       role: 'user',
       content,
       isStreaming: false,
-      timestamp: Date.now()
+      timestamp: Date.now(),
+      attachments,
     };
 
     const assistantMsg: Message = {
@@ -99,6 +101,11 @@ export const useChat = (ws?: any) => {
     setIsGenerating(false);
   }, []);
 
+  const clearHistory = useCallback(() => {
+    setMessages([]);
+    setIsGenerating(false);
+  }, []);
+
   return {
     messages,
     isGenerating,
@@ -106,6 +113,7 @@ export const useChat = (ws?: any) => {
     onChunk,
     onDone,
     onError,
-    onCancel
+    onCancel,
+    clearHistory
   };
 };

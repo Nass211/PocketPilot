@@ -1,11 +1,20 @@
 export type Role = 'user' | 'assistant';
 
+export interface MessageAttachment {
+  id: string;
+  type: 'image' | 'file';
+  uri: string;
+  name: string;
+  mimeType: string;
+}
+
 export interface Message {
   id: string;
   role: Role;
   content: string;
   isStreaming: boolean;
   timestamp: number;
+  attachments?: MessageAttachment[];
 }
 
 export type Mode = 'ask' | 'agent' | 'plan';

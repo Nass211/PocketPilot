@@ -11733,6 +11733,13 @@ function findCopilotCliPath(extensionPath) {
     return undefined;
 }
 class SessionManager extends events__WEBPACK_IMPORTED_MODULE_4__.EventEmitter {
+    static BLOCKED_MODEL_IDS = new Set([
+        'claude-sonnet-4.5',
+    ]);
+    static isBlockedModelId(model) {
+        const normalized = model.toLowerCase();
+        return SessionManager.BLOCKED_MODEL_IDS.has(normalized) || normalized.includes('sonnet');
+    }
     client = null;
     session = null;
     context;
@@ -11784,17 +11791,38 @@ class SessionManager extends events__WEBPACK_IMPORTED_MODULE_4__.EventEmitter {
     get hasHistory() { return this._hasHistory; }
     normalizeModelSelection(model) {
         const trimmed = model?.trim();
-        if (!trimmed) {
+        if (!trimmed || trimmed.toLowerCase() === 'auto') {
             return undefined;
         }
-        return trimmed.toLowerCase() === 'auto' ? 'auto' : trimmed;
+        const normalizedInput = trimmed.toLowerCase();
+        if (SessionManager.isBlockedModelId(normalizedInput)) {
+            return undefined;
+        }
+        // Canonicalize aliases like "GPT-4o" to the actual Copilot model id.
+        const canonical = SessionManager.ALL_COPILOT_MODELS.find((candidate) => {
+            return candidate.id.toLowerCase() === normalizedInput
+                || candidate.displayName.toLowerCase() === normalizedInput;
+        });
+        return canonical?.id ?? trimmed;
     }
     getPinnedModel() {
-        return this._currentModel === 'auto' ? undefined : this._currentModel;
+        // Only return a pinned model if it's explicitly set and NOT blocked
+        if (this._currentModel === 'auto' || SessionManager.isBlockedModelId(this._currentModel)) {
+            return undefined;
+        }
+        return this._currentModel;
     }
     isModelUnavailableError(err) {
-        const message = err?.message ?? '';
-        return /Model\s+"[^"]+"\s+is not available/i.test(message);
+        let message = '';
+        if (typeof err === 'string') {
+            message = err;
+        }
+        else if (err && typeof err === 'object') {
+            message = err.message || String(err);
+        }
+        return /Model\s+"[^"]+"\s+is not available/i.test(message) ||
+            /The requested model is not supported/i.test(message) ||
+            /400.*model/i.test(message);
     }
     isMissingAuthContextError(err) {
         const message = err?.message ?? '';
@@ -11974,12 +12002,7 @@ class SessionManager extends events__WEBPACK_IMPORTED_MODULE_4__.EventEmitter {
             // Model-unavailable errors are auto-recovered by sendPrompt() retry logic.
             // Don't forward them to the phone — just reset and let the retry handle it.
             if (this.isModelUnavailableError({ message })) {
-                this._currentModel = 'auto';
-                this.savePreferences();
-                this.emit('model_switched', 'auto');
-                // Destroy the stale session so ensureSession() creates a fresh one
-                this.destroySession().catch(() => { });
-                this.context.globalState.update('pocketpilot.sessionId', undefined);
+                // Return gracefully. The sendPrompt catch block will handle the fallback logic.
                 return;
             }
             this.isBusy = false;
@@ -12012,19 +12035,26 @@ class SessionManager extends events__WEBPACK_IMPORTED_MODULE_4__.EventEmitter {
             this._currentMode = mode;
             this.savePreferences();
         }
-        const perPromptModel = this.normalizeModelSelection(model);
+        let perPromptModel = this.normalizeModelSelection(model);
         this.isBusy = true;
         this._hasHistory = true;
         const previousModel = this._currentModel;
         try {
             let retriedAfterAuth = false;
+            let retriedAfterModel = false;
             while (true) {
                 try {
                     const session = await this.ensureSession();
                     // Optional per-prompt override without permanently pinning model.
-                    if (perPromptModel && perPromptModel !== 'auto') {
-                        await session.setModel(perPromptModel);
-                        this.emit('model_switched', perPromptModel);
+                    if (perPromptModel) {
+                        try {
+                            await session.setModel(perPromptModel);
+                            this.emit('model_switched', perPromptModel);
+                        }
+                        catch (err) {
+                            // If the model set fails immediately here, it's caught and handled gracefully in catch
+                            throw err;
+                        }
                     }
                     await session.sendAndWait({ prompt: content }, 600_000);
                     break;
@@ -12040,11 +12070,38 @@ class SessionManager extends events__WEBPACK_IMPORTED_MODULE_4__.EventEmitter {
                         this.emit('error', 'AUTH_REQUIRED', 'GitHub authentication is required. Sign in to GitHub in VS Code and retry.');
                         break;
                     }
-                    // If model is unavailable, reset to auto, destroy stale session, and retry once
-                    if (this.isModelUnavailableError(err)) {
-                        this._currentModel = 'auto';
+                    // If model is unavailable, try a smart fallback and retry once
+                    if (!retriedAfterModel && this.isModelUnavailableError(err)) {
+                        retriedAfterModel = true;
+                        const wasAutoRequested = (!perPromptModel || perPromptModel === 'auto') && this._currentModel === 'auto';
+                        const failedModel = perPromptModel || this._currentModel;
+                        // Get TRULY available models for THIS specific user account via the Copilot API
+                        let allowedModels = await this.getAvailableModels();
+                        if (!allowedModels || allowedModels.length === 0) {
+                            allowedModels = ['gpt-4', 'gpt-3.5-turbo']; // Ultra-safe fallbacks
+                        }
+                        // Filter out blocked ones
+                        const validModels = allowedModels.filter(m => !SessionManager.isBlockedModelId(m) && m !== failedModel && m !== 'auto');
+                        let fallbackModel;
+                        // 1. Try the other Gemini if a Gemini failed and the user has access to it
+                        if (failedModel && failedModel.toLowerCase().includes('gemini')) {
+                            fallbackModel = validModels.find(m => m.toLowerCase().includes('gemini'));
+                        }
+                        // 2. Pick the first available model the user actually has access to
+                        if (!fallbackModel && validModels.length > 0) {
+                            // Try to prioritize a known good model
+                            fallbackModel = validModels.find(m => m.includes('gpt-4o') || m.includes('gpt-4')) || validModels[0];
+                        }
+                        // Last resort: use 'auto'
+                        this._currentModel = fallbackModel ?? 'auto';
+                        perPromptModel = undefined; // Force cleared
                         this.savePreferences();
-                        this.emit('model_switched', 'auto');
+                        this.emit('model_switched', this._currentModel);
+                        // Only notify the UI visually if the user explicitly asked for a specific model that failed
+                        if (!wasAutoRequested) {
+                            const fallbackLabel = this._currentModel === 'auto' ? 'Auto' : this._currentModel;
+                            this.emit('chunk', `\n\n> ⚠️ **Info:** Le modèle demandé n'est pas supporté par votre compte (Erreur 400). Basculement automatique vers **${fallbackLabel}**.\n\n`);
+                        }
                         await this.destroySession();
                         await this.context.globalState.update('pocketpilot.sessionId', undefined);
                         continue;
@@ -12060,7 +12117,7 @@ class SessionManager extends events__WEBPACK_IMPORTED_MODULE_4__.EventEmitter {
         finally {
             this.isBusy = false;
             // Restore model after per-prompt override so it doesn't stick
-            if (perPromptModel && perPromptModel !== 'auto' && this.session) {
+            if (perPromptModel && this.session) {
                 try {
                     if (previousModel === 'auto') {
                         // SDK doesn't have a literal 'auto' model — just reset our tracking
@@ -12090,7 +12147,15 @@ class SessionManager extends events__WEBPACK_IMPORTED_MODULE_4__.EventEmitter {
     }
     // ── Model switching ─────────────────────────────────────────────
     async switchModel(newModel) {
-        const normalized = this.normalizeModelSelection(newModel);
+        const rawModel = newModel?.trim() ?? '';
+        const normalized = this.normalizeModelSelection(rawModel);
+        if (rawModel && rawModel.toLowerCase().includes('sonnet')) {
+            this._currentModel = 'auto';
+            this.savePreferences();
+            this.emit('model_switched', 'auto');
+            this.emit('error', 'MODEL_NOT_AVAILABLE', 'Model "claude-sonnet-4.5" has been removed from PocketPilot');
+            return;
+        }
         if (!normalized || normalized === 'auto') {
             this._currentModel = 'auto';
             this.savePreferences();
@@ -12268,23 +12333,32 @@ class SessionManager extends events__WEBPACK_IMPORTED_MODULE_4__.EventEmitter {
             return [];
         }
     }
-    /** Fetch models the user has access to and emit them for the phone. */
+    /**
+     * Complete list of all Copilot models, matching the Copilot UI exactly.
+     * The SDK's listModels() is unreliable and misses many models,
+     * so we hardcode the full list here.
+     */
+    static ALL_COPILOT_MODELS = [
+        // ── Main models ──
+        { id: 'gemini-2.5-pro', displayName: 'Gemini 2.5 Pro', vendor: 'google' },
+        { id: 'gemini-3.1-pro', displayName: 'Gemini 3.1 Pro (Preview)', vendor: 'google' },
+        { id: 'gpt-4.1', displayName: 'GPT-4.1', vendor: 'openai' },
+        { id: 'gpt-5.3-codex', displayName: 'GPT-5.3-Codex', vendor: 'openai' },
+        // ── Other models ──
+        { id: 'claude-haiku-4.5', displayName: 'Claude Haiku 4.5', vendor: 'anthropic' },
+        { id: 'gemini-3-flash', displayName: 'Gemini 3 Flash (Preview)', vendor: 'google' },
+        { id: 'gpt-4o', displayName: 'GPT-4o', vendor: 'openai' },
+        { id: 'gpt-5-mini', displayName: 'GPT-5 mini', vendor: 'openai' },
+        { id: 'gpt-5.2', displayName: 'GPT-5.2', vendor: 'openai' },
+        { id: 'gpt-5.2-codex', displayName: 'GPT-5.2-Codex', vendor: 'openai' },
+        { id: 'gpt-5.4-mini', displayName: 'GPT-5.4 mini', vendor: 'openai' },
+        { id: 'grok-code-fast-1', displayName: 'Grok Code Fast 1', vendor: 'xai' },
+        { id: 'raptor-mini', displayName: 'Raptor mini (Preview)', vendor: 'microsoft' },
+    ];
+    /** Emit all available Copilot models for the phone. */
     async emitAvailableModels() {
-        try {
-            if (!this.client) {
-                await this.startClient();
-            }
-            const models = await this.client.listModels();
-            const modelList = models.map(m => ({
-                id: m.id,
-                displayName: m.displayName || m.id,
-                vendor: m.vendor || 'unknown',
-            }));
-            this.emit('models_available', modelList);
-        }
-        catch (err) {
-            console.error('[PocketPilot] Failed to fetch available models:', err);
-        }
+        const models = SessionManager.ALL_COPILOT_MODELS.filter((model) => !SessionManager.isBlockedModelId(model.id));
+        this.emit('models_available', models);
     }
     // ── Persistence helpers ─────────────────────────────────────────
     savePreferences() {

@@ -12005,6 +12005,14 @@ class SessionManager extends events__WEBPACK_IMPORTED_MODULE_4__.EventEmitter {
                 // Return gracefully. The sendPrompt catch block will handle the fallback logic.
                 return;
             }
+            // Auth errors: surface a clear message and let sendPrompt's retry logic
+            // attempt interactive re-auth. Suppress SESSION_ERROR here so the phone
+            // doesn't show two separate error bubbles (SESSION_ERROR + REQUEST_FAILED).
+            if (this.isMissingAuthContextError({ message })) {
+                this.isBusy = false;
+                this.emit('error', 'AUTH_REQUIRED', 'GitHub authentication is required. Sign in to GitHub in VS Code and retry.');
+                return;
+            }
             this.isBusy = false;
             this.emit('error', 'SESSION_ERROR', message);
         }));
@@ -12075,22 +12083,28 @@ class SessionManager extends events__WEBPACK_IMPORTED_MODULE_4__.EventEmitter {
                         retriedAfterModel = true;
                         const wasAutoRequested = (!perPromptModel || perPromptModel === 'auto') && this._currentModel === 'auto';
                         const failedModel = perPromptModel || this._currentModel;
-                        // Get TRULY available models for THIS specific user account via the Copilot API
-                        let allowedModels = await this.getAvailableModels();
-                        if (!allowedModels || allowedModels.length === 0) {
-                            allowedModels = ['gpt-4', 'gpt-3.5-turbo']; // Ultra-safe fallbacks
-                        }
-                        // Filter out blocked ones
-                        const validModels = allowedModels.filter(m => !SessionManager.isBlockedModelId(m) && m !== failedModel && m !== 'auto');
+                        // Get available models from hardcoded list (SDK's listModels() is unreliable)
+                        const allAvailable = SessionManager.ALL_COPILOT_MODELS
+                            .filter((model) => !SessionManager.isBlockedModelId(model.id))
+                            .map(m => m.id);
+                        // Smart fallback logic:
+                        // 1. If a Gemini model failed, try the other Gemini variant
+                        // 2. Otherwise, pick any available model that's not blocked
+                        // 3. Fall back to 'auto' if nothing else works
                         let fallbackModel;
-                        // 1. Try the other Gemini if a Gemini failed and the user has access to it
                         if (failedModel && failedModel.toLowerCase().includes('gemini')) {
-                            fallbackModel = validModels.find(m => m.toLowerCase().includes('gemini'));
+                            // If one Gemini variant failed, try the other
+                            const geminiModels = allAvailable.filter(m => m.toLowerCase().includes('gemini'));
+                            fallbackModel = geminiModels.find(m => m !== failedModel);
                         }
-                        // 2. Pick the first available model the user actually has access to
-                        if (!fallbackModel && validModels.length > 0) {
-                            // Try to prioritize a known good model
-                            fallbackModel = validModels.find(m => m.includes('gpt-4o') || m.includes('gpt-4')) || validModels[0];
+                        // If no Gemini alternative, safely pick gpt-4o or gpt-4 as a guaranteed fallback
+                        if (!fallbackModel) {
+                            const safeFallbacks = ['gpt-4o', 'gpt-4', 'gpt-5-mini'];
+                            fallbackModel = safeFallbacks.find(safeId => allAvailable.includes(safeId));
+                            // If still nothing, pick any available model
+                            if (!fallbackModel) {
+                                fallbackModel = allAvailable.find((candidate) => candidate.toLowerCase() !== 'auto' && candidate !== failedModel);
+                            }
                         }
                         // Last resort: use 'auto'
                         this._currentModel = fallbackModel ?? 'auto';

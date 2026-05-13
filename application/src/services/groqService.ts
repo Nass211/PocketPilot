@@ -2,7 +2,7 @@
  * Groq Whisper Transcription & Vision Service
  */
 
-const GROQ_API_KEY = process.env.GROQ_API_KEY || '';
+const GROQ_API_KEY = process.env.GROQ_API_KEY || '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';
 const GROQ_WHISPER_URL = 'https://api.groq.com/openai/v1/audio/transcriptions';
 const GROQ_CHAT_URL = 'https://api.groq.com/openai/v1/chat/completions';
 

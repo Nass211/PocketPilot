@@ -2,7 +2,9 @@
  * Groq Whisper Transcription & Vision Service
  */
 
-const GROQ_API_KEY = process.env.GROQ_API_KEY || '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';
+// IMPORTANT: Set GROQ_API_KEY in your .env or Expo extra config.
+// Never hardcode API keys in source code.
+const GROQ_API_KEY = process.env.EXPO_PUBLIC_GROQ_API_KEY || process.env.GROQ_API_KEY || '';
 const GROQ_WHISPER_URL = 'https://api.groq.com/openai/v1/audio/transcriptions';
 const GROQ_CHAT_URL = 'https://api.groq.com/openai/v1/chat/completions';
 
@@ -24,7 +26,7 @@ export async function transcribeAudio(audioUri: string): Promise<string> {
     name: fileName,
   } as any);
   formData.append('model', 'whisper-large-v3-turbo');
-  formData.append('language', 'fr');
+  formData.append('language', 'en');
   formData.append('response_format', 'json');
 
   const response = await fetch(GROQ_WHISPER_URL, {
@@ -64,7 +66,7 @@ export async function imageToBase64(uri: string): Promise<string> {
  */
 export async function analyzeImage(
   imageUri: string,
-  userPrompt: string = 'Décris cette image en détail.'
+  userPrompt: string = 'Describe this image in detail.'
 ): Promise<string> {
   const base64 = await imageToBase64(imageUri);
 

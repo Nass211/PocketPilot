@@ -41,6 +41,9 @@ export class QRCodePanel {
             });
         }
 
+        // Always update the HTML so the QR code reflects the current tunnel URL.
+        // Without this, re-opening the panel after a tunnel restart shows a stale URL.
+
         this.panel.webview.html = this.getHtml(qrDataUrl, localUrl, remoteUrl, options.authToken);
     }
 

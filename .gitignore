@@ -19,16 +19,10 @@ yarn-error.log*
 .DS_Store
 Thumbs.db
 
-# Optional: Keep these but ignore other .vscode contents
-.vscode/*
-!.vscode/launch.json
-!.vscode/tasks.json
-!.vscode/settings.json
-!.vscode/extensions.json
-
-
-.DS_Store
-Thumbs.db
+# Environment / secrets
+.env
+.env.local
+.env.*.local
 
 # Optional: Keep these but ignore other .vscode contents
 .vscode/*
@@ -37,25 +31,5 @@ Thumbs.db
 !.vscode/settings.json
 !.vscode/extensions.json
 
-
-.DS_Store
-Thumbs.db
-
-.DS_Store
-Thumbs.db
-
-# Optional: Keep these but ignore other .vscode contents
-.vscode/*
-!.vscode/launch.json
-!.vscode/tasks.json
-!.vscode/settings.json
-!.vscode/extensions.json
-# asdasd
-
-# Optional: Keep these but ignore other .vscode contents
-.vscode/*
-!.vscode/launch.json
-!.vscode/tasks.json
-!.vscode/settings.json
-!.vscode/extensions.json
-
+# PocketPilot temp files
+.pocketpilot/

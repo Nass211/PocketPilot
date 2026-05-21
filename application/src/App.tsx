@@ -27,7 +27,7 @@ function RootNavigator() {
           <Stack.Screen name="Chat" component={ChatScreen}
             options={{ headerShown: false }} />
           <Stack.Screen name="Settings" component={SettingsScreen}
-            options={{ title: 'Paramètres' }} />
+            options={{ title: 'Settings' }} />
         </Stack.Navigator>
       </NavigationContainer>
     </>

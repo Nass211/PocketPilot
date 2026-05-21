@@ -5286,6 +5286,11 @@ class StatusBarManager {
         this.item.backgroundColor = undefined;
         this.item.tooltip = 'Phone is connected';
     }
+    setTunnelReady() {
+        this.item.text = '$(broadcast) PocketPilot — tunnel ready';
+        this.item.backgroundColor = undefined;
+        this.item.tooltip = 'Tunnel active — scan QR to connect phone';
+    }
     setBusy(task) {
         this.item.text = `$(sync~spin) PocketPilot — ${task}`;
         this.item.backgroundColor = undefined;
@@ -5320,10 +5325,13 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
-const TUNNEL_TIMEOUT_MS = 15_000;
+const CF_TIMEOUT_MS = 15_000; // 15s for Cloudflare (fail fast so we can fallback)
+const SSH_TIMEOUT_MS = 20_000; // 20s for SSH tunnel
+const LT_TIMEOUT_MS = 20_000; // 20s for localtunnel
 class TunnelManager extends events__WEBPACK_IMPORTED_MODULE_1__.EventEmitter {
     process = null;
     _tunnelUrl = null;
+    _provider = '';
     extensionRoot;
     constructor(extensionRoot) {
         super();
@@ -5332,25 +5340,34 @@ class TunnelManager extends events__WEBPACK_IMPORTED_MODULE_1__.EventEmitter {
     get tunnelUrl() {
         return this._tunnelUrl;
     }
+    get provider() {
+        return this._provider;
+    }
     get isRunning() {
         return this.process !== null && !this.process.killed;
     }
-    /**
-     * Resolve the cloudflared binary path.
-     * 1. Check for a bundled binary next to the extension (e.g. pocketpilot/cloudflared)
-     * 2. Fall back to the system PATH
-     */
+    // ── Binary resolution ──────────────────────────────────────────
     getCloudflaredPath() {
-        // Check for bundled binary in the extension root directory
         const bundledName = process.platform === 'win32' ? 'cloudflared.exe' : 'cloudflared';
         const bundledPath = path__WEBPACK_IMPORTED_MODULE_2__.join(this.extensionRoot, bundledName);
         if (fs__WEBPACK_IMPORTED_MODULE_3__.existsSync(bundledPath)) {
             return bundledPath;
         }
-        // Fall back to system PATH
         return 'cloudflared';
     }
-    /** Check if cloudflared is installed (bundled or system). */
+    getLocaltunnelPath() {
+        const candidates = [
+            path__WEBPACK_IMPORTED_MODULE_2__.join(this.extensionRoot, 'node_modules', '.bin', 'lt'),
+            path__WEBPACK_IMPORTED_MODULE_2__.join(this.extensionRoot, 'node_modules', '.bin', 'lt.cmd'),
+        ];
+        for (const p of candidates) {
+            if (fs__WEBPACK_IMPORTED_MODULE_3__.existsSync(p)) {
+                return p;
+            }
+        }
+        return null;
+    }
+    /** Check if cloudflared is installed. */
     async checkInstalled() {
         return new Promise((resolve) => {
             const bin = this.getCloudflaredPath();
@@ -5359,52 +5376,265 @@ class TunnelManager extends events__WEBPACK_IMPORTED_MODULE_1__.EventEmitter {
             proc.on('close', (code) => resolve(code === 0));
         });
     }
-    /** Start a Cloudflare quick tunnel for the given port. Resolves with the public URL. */
-    async start(port) {
+    // ── Main entry point: try providers in order ───────────────────
+    /**
+     * Start a tunnel.  Tries providers in order:
+     *   1. Cloudflare Quick Tunnel
+     *   2. SSH tunnel via serveo.net then localhost.run  (zero install)
+     *   3. localtunnel (lt)  (if npm-installed)
+     */
+    async start(port, progress) {
         if (this.isRunning) {
             if (this._tunnelUrl) {
                 return this._tunnelUrl;
             }
             this.stop();
         }
+        const errors = [];
+        // ── 1. Cloudflare ────────────────────────────────────────
+        try {
+            progress?.('Trying Cloudflare tunnel…');
+            const url = await this.startCloudflare(port);
+            this._provider = 'cloudflare';
+            return url;
+        }
+        catch (cfErr) {
+            errors.push(`Cloudflare: ${(cfErr.message ?? '').split('\n')[0]}`);
+            progress?.('Cloudflare failed — trying SSH tunnel…');
+        }
+        // ── 2. SSH (serveo.net → localhost.run) ───────────────────
+        try {
+            const url = await this.startSSHTunnel(port);
+            return url;
+        }
+        catch (sshErr) {
+            errors.push(`SSH: ${(sshErr.message ?? '').split('\n')[0]}`);
+            progress?.('SSH tunnel failed — trying localtunnel…');
+        }
+        // ── 3. localtunnel (lt) ──────────────────────────────────
+        const ltPath = this.getLocaltunnelPath();
+        if (ltPath) {
+            try {
+                const url = await this.startLocaltunnel(port, ltPath);
+                this._provider = 'localtunnel';
+                return url;
+            }
+            catch (ltErr) {
+                errors.push(`localtunnel: ${(ltErr.message ?? '').split('\n')[0]}`);
+            }
+        }
+        // ── All failed ───────────────────────────────────────────
+        throw new Error(`All tunnel providers failed:\n\n` +
+            errors.map(e => `  • ${e}`).join('\n') +
+            `\n\nCheck your internet connection and try again.`);
+    }
+    // ── Provider: Cloudflare Quick Tunnel ─────────────────────────
+    startCloudflare(port) {
         const bin = this.getCloudflaredPath();
         return new Promise((resolve, reject) => {
-            this.process = (0,child_process__WEBPACK_IMPORTED_MODULE_0__.spawn)(bin, [
-                'tunnel', '--url', `http://localhost:${port}`,
-            ]);
+            this.process = (0,child_process__WEBPACK_IMPORTED_MODULE_0__.spawn)(bin, ['tunnel', '--url', `http://localhost:${port}`]);
+            let resolved = false;
+            let log = '';
             const timeout = setTimeout(() => {
+                if (!resolved) {
+                    resolved = true;
+                    this.stop();
+                    reject(new Error(`Cloudflare timed out (${CF_TIMEOUT_MS / 1000}s).\n${log.slice(-300)}`));
+                }
+            }, CF_TIMEOUT_MS);
+            const handle = (data) => {
+                const text = data.toString();
+                log += text;
+                const match = text.match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/);
+                if (match && !resolved) {
+                    resolved = true;
+                    this._tunnelUrl = match[0];
+                    clearTimeout(timeout);
+                    this.emit('url', this._tunnelUrl);
+                    resolve(this._tunnelUrl);
+                    return;
+                }
+                // Fast-fail on known server errors
+                if (!resolved && (text.includes('failed to request quick Tunnel') ||
+                    text.includes('status_code="500') ||
+                    text.includes('Internal Server Error') ||
+                    text.includes('connection refused') ||
+                    text.includes('no such host'))) {
+                    resolved = true;
+                    clearTimeout(timeout);
+                    this.stop();
+                    const line = log.split('\n').find(l => l.includes('failed') || l.includes('ERR')) || text.trim();
+                    reject(new Error(line));
+                }
+            };
+            this.process.stderr?.on('data', handle);
+            this.process.stdout?.on('data', handle);
+            this.process.on('error', (err) => { clearTimeout(timeout); if (!resolved) {
+                resolved = true;
                 this.stop();
-                reject(new Error('Tunnel startup timed out'));
-            }, TUNNEL_TIMEOUT_MS);
-            // cloudflared prints the URL to stderr
-            this.process.stderr?.on('data', (data) => {
-                const output = data.toString();
-                const match = output.match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/);
-                if (match && !this._tunnelUrl) {
+                reject(err);
+            } });
+            this.process.on('close', (code) => {
+                this._tunnelUrl = null;
+                this.process = null;
+                this.emit('stopped');
+                if (!resolved) {
+                    resolved = true;
+                    clearTimeout(timeout);
+                    reject(new Error(`cloudflared exited ${code}.\n${log.slice(-300)}`));
+                }
+            });
+        });
+    }
+    // ── Provider: SSH tunnel (tries serveo.net, then localhost.run) ──
+    async startSSHTunnel(port) {
+        // Try serveo.net first — clean output, reliable
+        try {
+            const url = await this.startSSHProvider(port, {
+                host: 'serveo.net',
+                // Output: "Forwarding HTTP traffic from https://xxxxx.serveo.net"
+                urlRegex: /https:\/\/[a-z0-9]+\.serveo\.net/,
+            });
+            this._provider = 'serveo.net';
+            return url;
+        }
+        catch {
+            // Fall through to localhost.run
+        }
+        // Try localhost.run
+        const url = await this.startSSHProvider(port, {
+            host: 'localhost.run',
+            user: 'nokey',
+            // The actual tunnel URL uses .lhr.life domain (NOT .localhost.run which is banner text)
+            urlRegex: /https:\/\/[a-z0-9]+\.lhr\.life/,
+            linePrefix: 'your url is:',
+        });
+        this._provider = 'localhost.run';
+        return url;
+    }
+    startSSHProvider(port, opts) {
+        return new Promise((resolve, reject) => {
+            const target = opts.user ? `${opts.user}@${opts.host}` : opts.host;
+            this.process = (0,child_process__WEBPACK_IMPORTED_MODULE_0__.spawn)('ssh', [
+                '-o', 'StrictHostKeyChecking=no',
+                '-o', 'ServerAliveInterval=30',
+                '-o', 'ConnectTimeout=10',
+                '-R', `80:localhost:${port}`,
+                target,
+            ]);
+            let resolved = false;
+            let log = '';
+            const timeout = setTimeout(() => {
+                if (!resolved) {
+                    resolved = true;
+                    this.stop();
+                    reject(new Error(`SSH tunnel to ${opts.host} timed out (${SSH_TIMEOUT_MS / 1000}s).\n${log.slice(-300)}`));
+                }
+            }, SSH_TIMEOUT_MS);
+            const handle = (data) => {
+                const text = data.toString();
+                log += text;
+                // Primary: match the specific tunnel URL pattern
+                const match = text.match(opts.urlRegex);
+                if (match && !resolved) {
+                    resolved = true;
+                    this._tunnelUrl = match[0];
+                    clearTimeout(timeout);
+                    this.emit('url', this._tunnelUrl);
+                    resolve(this._tunnelUrl);
+                    return;
+                }
+                // Secondary: parse "your url is: https://..." lines
+                if (opts.linePrefix && !resolved) {
+                    for (const line of text.split('\n')) {
+                        const lower = line.toLowerCase();
+                        if (lower.includes(opts.linePrefix)) {
+                            const urlMatch = line.match(/https:\/\/\S+/);
+                            if (urlMatch) {
+                                resolved = true;
+                                this._tunnelUrl = urlMatch[0].replace(/[*\s]+$/, '');
+                                clearTimeout(timeout);
+                                this.emit('url', this._tunnelUrl);
+                                resolve(this._tunnelUrl);
+                                return;
+                            }
+                        }
+                    }
+                }
+            };
+            this.process.stdout?.on('data', handle);
+            this.process.stderr?.on('data', handle);
+            this.process.on('error', (err) => { clearTimeout(timeout); if (!resolved) {
+                resolved = true;
+                this.stop();
+                reject(err);
+            } });
+            this.process.on('close', (code) => {
+                this._tunnelUrl = null;
+                this.process = null;
+                this.emit('stopped');
+                if (!resolved) {
+                    resolved = true;
+                    clearTimeout(timeout);
+                    reject(new Error(`ssh → ${opts.host} exited ${code}.\n${log.slice(-300)}`));
+                }
+            });
+        });
+    }
+    // ── Provider: localtunnel (lt) ────────────────────────────────
+    startLocaltunnel(port, ltBin) {
+        return new Promise((resolve, reject) => {
+            this.process = (0,child_process__WEBPACK_IMPORTED_MODULE_0__.spawn)(ltBin, ['--port', String(port)], {
+                shell: process.platform === 'win32',
+            });
+            let resolved = false;
+            let log = '';
+            const timeout = setTimeout(() => {
+                if (!resolved) {
+                    resolved = true;
+                    this.stop();
+                    reject(new Error(`localtunnel timed out.\n${log.slice(-300)}`));
+                }
+            }, LT_TIMEOUT_MS);
+            const handle = (data) => {
+                const text = data.toString();
+                log += text;
+                const match = text.match(/https:\/\/[a-z0-9-]+\.loca\.lt/);
+                if (match && !resolved) {
+                    resolved = true;
                     this._tunnelUrl = match[0];
                     clearTimeout(timeout);
                     this.emit('url', this._tunnelUrl);
                     resolve(this._tunnelUrl);
                 }
-            });
-            this.process.on('error', (err) => {
-                clearTimeout(timeout);
+            };
+            this.process.stdout?.on('data', handle);
+            this.process.stderr?.on('data', handle);
+            this.process.on('error', (err) => { clearTimeout(timeout); if (!resolved) {
+                resolved = true;
                 this.stop();
                 reject(err);
-            });
-            this.process.on('close', () => {
+            } });
+            this.process.on('close', (code) => {
                 this._tunnelUrl = null;
                 this.process = null;
                 this.emit('stopped');
+                if (!resolved) {
+                    resolved = true;
+                    clearTimeout(timeout);
+                    reject(new Error(`lt exited ${code}.`));
+                }
             });
         });
     }
+    // ── Stop ──────────────────────────────────────────────────────
     stop() {
         if (this.process) {
             this.process.kill();
             this.process = null;
         }
         this._tunnelUrl = null;
+        this._provider = '';
     }
 }
 
@@ -5470,6 +5700,8 @@ class QRCodePanel {
                 this.panel = null;
             });
         }
+        // Always update the HTML so the QR code reflects the current tunnel URL.
+        // Without this, re-opening the panel after a tunnel restart shows a stale URL.
         this.panel.webview.html = this.getHtml(qrDataUrl, localUrl, remoteUrl, options.authToken);
     }
     dispose() {
@@ -11748,8 +11980,10 @@ class SessionManager extends events__WEBPACK_IMPORTED_MODULE_4__.EventEmitter {
     _currentMode = 'ask';
     _hasHistory = false;
     isBusy = false;
-    // Pending permission/input forwarded to phone, resolved when phone responds
-    pendingPermission = null;
+    // Pending permission/input forwarded to phone, resolved when phone responds.
+    // Uses a queue so multiple concurrent SDK permission requests don't orphan
+    // each other's Promises (which was causing the "stuck forever" bug).
+    pendingPermissionQueue = [];
     pendingUserInput = null;
     waitingForRevision = false;
     // Session-level permission memory (reset on disconnect)
@@ -11798,12 +12032,7 @@ class SessionManager extends events__WEBPACK_IMPORTED_MODULE_4__.EventEmitter {
         if (SessionManager.isBlockedModelId(normalizedInput)) {
             return undefined;
         }
-        // Canonicalize aliases like "GPT-4o" to the actual Copilot model id.
-        const canonical = SessionManager.ALL_COPILOT_MODELS.find((candidate) => {
-            return candidate.id.toLowerCase() === normalizedInput
-                || candidate.displayName.toLowerCase() === normalizedInput;
-        });
-        return canonical?.id ?? trimmed;
+        return trimmed;
     }
     getPinnedModel() {
         // Only return a pinned model if it's explicitly set and NOT blocked
@@ -11981,10 +12210,19 @@ class SessionManager extends events__WEBPACK_IMPORTED_MODULE_4__.EventEmitter {
         this.eventUnsubs.push(session.on('assistant.message_delta', (event) => {
             this.emit('chunk', event.data.deltaContent);
         }));
+        // Reasoning / thinking deltas → phone (like Claude's thinking UI)
+        this.eventUnsubs.push(session.on('assistant.reasoning_delta', (event) => {
+            const content = event?.data?.deltaContent;
+            if (content) {
+                // Wrap reasoning in a blockquote so it renders as a "thinking" block
+                this.emit('chunk', content);
+            }
+        }));
         // Session idle → response complete
         this.eventUnsubs.push(session.on('session.idle', () => {
             if (this.isBusy) {
                 this.isBusy = false;
+                this.emit('activity', ''); // Clear activity status
                 this.emit('done');
                 // In plan mode, offer action buttons
                 if (this._currentMode === 'plan') {
@@ -12014,11 +12252,24 @@ class SessionManager extends events__WEBPACK_IMPORTED_MODULE_4__.EventEmitter {
                 return;
             }
             this.isBusy = false;
+            this.emit('activity', '');
             this.emit('error', 'SESSION_ERROR', message);
         }));
-        // Tool execution status (forward as notifications)
+        // Tool execution start → emit inline progress AND activity status
         this.eventUnsubs.push(session.on('tool.execution_start', (event) => {
-            this.emit('notification', 'Tool Running', `Running: ${event.data.toolName}`);
+            const toolName = event.data.toolName || 'tool';
+            // Format a human-readable activity label
+            const label = this.formatToolLabel(toolName);
+            this.emit('activity', label);
+            this.emit('notification', 'Tool Running', `Running: ${toolName}`);
+            // Emit inline thinking chunk so the user sees what's happening in the chat
+            this.emit('chunk', `\n\n> 🔧 **${label}**\n\n`);
+        }));
+        // Tool execution complete → update inline progress
+        this.eventUnsubs.push(session.on('tool.execution_complete', (event) => {
+            const toolName = event?.data?.toolName || 'tool';
+            const label = this.formatToolLabel(toolName);
+            this.emit('activity', `✓ ${label}`);
         }));
         // Model changed by the session itself
         this.eventUnsubs.push(session.on('session.model_change', (event) => {
@@ -12027,18 +12278,42 @@ class SessionManager extends events__WEBPACK_IMPORTED_MODULE_4__.EventEmitter {
             this.emit('model_switched', event.data.newModel);
         }));
     }
+    /** Convert a raw tool name like 'edit_file' to a readable label like 'Editing file' */
+    formatToolLabel(toolName) {
+        const labels = {
+            'read_file': 'Reading file',
+            'edit_file': 'Editing file',
+            'write_file': 'Writing file',
+            'list_directory': 'Listing directory',
+            'search_files': 'Searching files',
+            'run_command': 'Running command',
+            'grep_search': 'Searching code',
+            'file_search': 'Searching files',
+            'execute_command': 'Running command',
+            'create_file': 'Creating file',
+            'delete_file': 'Deleting file',
+            'view': 'Reading file',
+            'bash': 'Running command',
+        };
+        return labels[toolName] || toolName.replace(/_/g, ' ');
+    }
     async destroySession() {
         for (const unsub of this.eventUnsubs) {
             unsub();
         }
         this.eventUnsubs = [];
+        // Flush pending permission queue to prevent leaked Promises
+        for (const queued of this.pendingPermissionQueue) {
+            queued.resolve({ kind: 'denied-interactively-by-user' });
+        }
+        this.pendingPermissionQueue = [];
         if (this.session) {
             await this.session.disconnect().catch(() => { });
             this.session = null;
         }
     }
     // ── Core: send a prompt ─────────────────────────────────────────
-    async sendPrompt(content, mode, model) {
+    async sendPrompt(content, mode, model, attachments) {
         if (mode && mode !== this._currentMode) {
             this._currentMode = mode;
             this.savePreferences();
@@ -12047,6 +12322,29 @@ class SessionManager extends events__WEBPACK_IMPORTED_MODULE_4__.EventEmitter {
         this.isBusy = true;
         this._hasHistory = true;
         const previousModel = this._currentModel;
+        // Save image attachments to workspace temp dir so Copilot can read them
+        const sdkAttachments = [];
+        if (attachments && attachments.length > 0) {
+            const wsFolder = vscode__WEBPACK_IMPORTED_MODULE_0__.workspace.workspaceFolders?.[0]?.uri.fsPath;
+            if (wsFolder) {
+                const uploadDir = (0,path__WEBPACK_IMPORTED_MODULE_3__.join)(wsFolder, '.pocketpilot', 'uploads');
+                if (!(0,fs__WEBPACK_IMPORTED_MODULE_2__.existsSync)(uploadDir)) {
+                    (0,fs__WEBPACK_IMPORTED_MODULE_2__.mkdirSync)(uploadDir, { recursive: true });
+                }
+                for (const att of attachments) {
+                    try {
+                        const ext = att.name.split('.').pop() || 'jpg';
+                        const fileName = `upload-${Date.now()}.${ext}`;
+                        const filePath = (0,path__WEBPACK_IMPORTED_MODULE_3__.join)(uploadDir, fileName);
+                        (0,fs__WEBPACK_IMPORTED_MODULE_2__.writeFileSync)(filePath, Buffer.from(att.data, 'base64'));
+                        sdkAttachments.push({ type: 'file', path: filePath, displayName: att.name });
+                    }
+                    catch (e) {
+                        // Skip failed attachments silently
+                    }
+                }
+            }
+        }
         try {
             let retriedAfterAuth = false;
             let retriedAfterModel = false;
@@ -12064,7 +12362,11 @@ class SessionManager extends events__WEBPACK_IMPORTED_MODULE_4__.EventEmitter {
                             throw err;
                         }
                     }
-                    await session.sendAndWait({ prompt: content }, 600_000);
+                    const msgOptions = { prompt: content };
+                    if (sdkAttachments.length > 0) {
+                        msgOptions.attachments = sdkAttachments;
+                    }
+                    await session.sendAndWait(msgOptions, 600_000);
                     break;
                 }
                 catch (err) {
@@ -12083,25 +12385,28 @@ class SessionManager extends events__WEBPACK_IMPORTED_MODULE_4__.EventEmitter {
                         retriedAfterModel = true;
                         const wasAutoRequested = (!perPromptModel || perPromptModel === 'auto') && this._currentModel === 'auto';
                         const failedModel = perPromptModel || this._currentModel;
-                        // Get available models from hardcoded list (SDK's listModels() is unreliable)
-                        const allAvailable = SessionManager.ALL_COPILOT_MODELS
-                            .filter((model) => !SessionManager.isBlockedModelId(model.id))
-                            .map(m => m.id);
+                        // Query the SDK for available models dynamically
+                        let allAvailable = [];
+                        try {
+                            const modelInfos = await this.client.listModels();
+                            allAvailable = modelInfos
+                                .filter((m) => !SessionManager.isBlockedModelId(m.id))
+                                .filter((m) => !m.policy || m.policy.state !== 'disabled')
+                                .map(m => m.id);
+                        }
+                        catch { /* SDK call failed — will fall back to auto */ }
                         // Smart fallback logic:
                         // 1. If a Gemini model failed, try the other Gemini variant
                         // 2. Otherwise, pick any available model that's not blocked
                         // 3. Fall back to 'auto' if nothing else works
                         let fallbackModel;
                         if (failedModel && failedModel.toLowerCase().includes('gemini')) {
-                            // If one Gemini variant failed, try the other
                             const geminiModels = allAvailable.filter(m => m.toLowerCase().includes('gemini'));
                             fallbackModel = geminiModels.find(m => m !== failedModel);
                         }
-                        // If no Gemini alternative, safely pick gpt-4o or gpt-4 as a guaranteed fallback
                         if (!fallbackModel) {
                             const safeFallbacks = ['gpt-4o', 'gpt-4', 'gpt-5-mini'];
                             fallbackModel = safeFallbacks.find(safeId => allAvailable.includes(safeId));
-                            // If still nothing, pick any available model
                             if (!fallbackModel) {
                                 fallbackModel = allAvailable.find((candidate) => candidate.toLowerCase() !== 'auto' && candidate !== failedModel);
                             }
@@ -12114,7 +12419,7 @@ class SessionManager extends events__WEBPACK_IMPORTED_MODULE_4__.EventEmitter {
                         // Only notify the UI visually if the user explicitly asked for a specific model that failed
                         if (!wasAutoRequested) {
                             const fallbackLabel = this._currentModel === 'auto' ? 'Auto' : this._currentModel;
-                            this.emit('chunk', `\n\n> ⚠️ **Info:** Le modèle demandé n'est pas supporté par votre compte (Erreur 400). Basculement automatique vers **${fallbackLabel}**.\n\n`);
+                            this.emit('chunk', `\n\n> ⚠️ **Info:** The requested model is not supported by your account (Error 400). Automatically switching to **${fallbackLabel}**.\n\n`);
                         }
                         await this.destroySession();
                         await this.context.globalState.update('pocketpilot.sessionId', undefined);
@@ -12211,53 +12516,101 @@ class SessionManager extends events__WEBPACK_IMPORTED_MODULE_4__.EventEmitter {
         if (this.sessionApprovals.get(request.kind)) {
             return { kind: 'approved' };
         }
+        // In agent mode, auto-approve read-only operations so tools don't pile up.
+        // The user explicitly chose agent mode to let the AI work autonomously.
+        // Only truly destructive operations (write, shell) still prompt.
+        const readOnlyKinds = new Set(['read', 'mcp', 'url']);
+        if (this._currentMode === 'agent' && readOnlyKinds.has(request.kind)) {
+            return { kind: 'approved' };
+        }
         // Build a human-readable description of the request
         const description = this.describePermission(request);
-        // Forward to phone and wait for response
+        const requestId = `perm_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+        // Forward to phone and wait for response — queue-based so concurrent
+        // requests don't clobber each other.
         return new Promise((resolve) => {
-            this.pendingPermission = { resolve };
-            this.emit('permission_request', request.kind, request.kind, description);
+            this.pendingPermissionQueue.push({ id: requestId, resolve, kind: request.kind });
+            // Only emit to the phone if this is the first item in the queue
+            // (i.e. no modal is currently showing). Otherwise the phone will
+            // be prompted when the current one is resolved.
+            if (this.pendingPermissionQueue.length === 1) {
+                this.emit('permission_request', requestId, request.kind, description);
+            }
         });
     }
     describePermission(request) {
+        const r = request;
+        // Helper: extract the best file identifier from the request
+        const getFile = () => {
+            // The SDK uses different field names depending on the version
+            const raw = r.filePath || r.fileName || r.path || r.file || r.uri || '';
+            if (!raw) {
+                return 'unknown file';
+            }
+            // Show just the basename for readability, full path in parentheses
+            const parts = String(raw).split('/');
+            const base = parts[parts.length - 1];
+            return parts.length > 1 ? `${base} (${raw})` : base;
+        };
         switch (request.kind) {
             case 'shell':
-                return `Run command: ${request.fullCommandText ?? 'shell command'}`;
+                return `Run command: ${r.fullCommandText || r.command || r.commandLine || 'shell command'}`;
             case 'write':
-                return `Write file: ${request.fileName ?? 'unknown file'}`;
+                return `Write file: ${getFile()}`;
             case 'read':
-                return `Read file: ${request.fileName ?? 'unknown file'}`;
+                return `Read file: ${getFile()}`;
             case 'mcp':
-                return `MCP tool: ${request.toolName ?? 'unknown tool'}`;
+                return `MCP tool: ${r.toolName || r.name || 'unknown tool'}`;
             case 'url':
-                return `Fetch URL: ${request.url ?? 'unknown URL'}`;
+                return `Fetch URL: ${r.url || 'unknown URL'}`;
             case 'custom-tool':
-                return `Custom tool: ${request.toolName ?? 'unknown tool'}`;
+                return `Custom tool: ${r.toolName || r.name || 'unknown tool'}`;
             default:
                 return `Permission: ${request.kind}`;
         }
     }
     resolvePermission(_id, decision) {
-        if (!this.pendingPermission) {
+        if (this.pendingPermissionQueue.length === 0) {
             return;
         }
+        // Dequeue the first (currently visible) permission request
+        const current = this.pendingPermissionQueue.shift();
         let result;
         if (decision === 'allow' || decision === 'allow_session' || decision === 'allow_all') {
             result = { kind: 'approved' };
             // Remember the approval scope
-            if (decision === 'allow_session') {
-                // We don't have the kind here, but the pending permission was for a specific request
-                // Store it generically
+            if (decision === 'allow_session' && current.kind) {
+                this.sessionApprovals.set(current.kind, true);
             }
             if (decision === 'allow_all') {
                 this.allowAllSession = true;
+                // Auto-resolve everything else in the queue
+                for (const queued of this.pendingPermissionQueue) {
+                    queued.resolve({ kind: 'approved' });
+                }
+                this.pendingPermissionQueue = [];
             }
         }
         else {
             result = { kind: 'denied-interactively-by-user' };
         }
-        this.pendingPermission.resolve(result);
-        this.pendingPermission = null;
+        current.resolve(result);
+        // If there are more requests queued and we didn't just "allow all",
+        // auto-approve requests whose kind is now remembered, then emit the
+        // next one that still needs manual approval.
+        while (this.pendingPermissionQueue.length > 0) {
+            const next = this.pendingPermissionQueue[0];
+            if (this.allowAllSession || (next.kind && this.sessionApprovals.get(next.kind))) {
+                this.pendingPermissionQueue.shift();
+                next.resolve({ kind: 'approved' });
+            }
+            else {
+                // Emit the next request to the phone
+                const desc = `Permission: ${next.kind ?? 'unknown'}`;
+                this.emit('permission_request', next.id, next.kind ?? 'unknown', desc);
+                break;
+            }
+        }
     }
     // ── User input handling (SDK → phone → SDK) ─────────────────────
     async handleUserInputRequest(request) {
@@ -12281,6 +12634,11 @@ class SessionManager extends events__WEBPACK_IMPORTED_MODULE_4__.EventEmitter {
     resetSessionPermissions() {
         this.sessionApprovals.clear();
         this.allowAllSession = false;
+        // Deny any outstanding permission requests so their Promises don't leak
+        for (const queued of this.pendingPermissionQueue) {
+            queued.resolve({ kind: 'denied-interactively-by-user' });
+        }
+        this.pendingPermissionQueue = [];
     }
     // ── Action buttons (plan mode) ──────────────────────────────────
     async handleAction(action) {
@@ -12348,31 +12706,49 @@ class SessionManager extends events__WEBPACK_IMPORTED_MODULE_4__.EventEmitter {
         }
     }
     /**
-     * Complete list of all Copilot models, matching the Copilot UI exactly.
-     * The SDK's listModels() is unreliable and misses many models,
-     * so we hardcode the full list here.
+     * Known Copilot models — used as a supplement when the SDK's listModels()
+     * doesn't return the full set (which it often doesn't).
+     * Models the user doesn't have access to will fail gracefully at use time.
      */
-    static ALL_COPILOT_MODELS = [
-        // ── Main models ──
-        { id: 'gemini-2.5-pro', displayName: 'Gemini 2.5 Pro', vendor: 'google' },
-        { id: 'gemini-3.1-pro', displayName: 'Gemini 3.1 Pro (Preview)', vendor: 'google' },
-        { id: 'gpt-4.1', displayName: 'GPT-4.1', vendor: 'openai' },
-        { id: 'gpt-5.3-codex', displayName: 'GPT-5.3-Codex', vendor: 'openai' },
-        // ── Other models ──
-        { id: 'claude-haiku-4.5', displayName: 'Claude Haiku 4.5', vendor: 'anthropic' },
-        { id: 'gemini-3-flash', displayName: 'Gemini 3 Flash (Preview)', vendor: 'google' },
-        { id: 'gpt-4o', displayName: 'GPT-4o', vendor: 'openai' },
-        { id: 'gpt-5-mini', displayName: 'GPT-5 mini', vendor: 'openai' },
-        { id: 'gpt-5.2', displayName: 'GPT-5.2', vendor: 'openai' },
-        { id: 'gpt-5.2-codex', displayName: 'GPT-5.2-Codex', vendor: 'openai' },
-        { id: 'gpt-5.4-mini', displayName: 'GPT-5.4 mini', vendor: 'openai' },
-        { id: 'grok-code-fast-1', displayName: 'Grok Code Fast 1', vendor: 'xai' },
-        { id: 'raptor-mini', displayName: 'Raptor mini (Preview)', vendor: 'microsoft' },
+    static KNOWN_COPILOT_MODELS = [
+        { id: 'claude-haiku-4.5', displayName: 'Claude Haiku 4.5' },
+        { id: 'gemini-2.5-pro', displayName: 'Gemini 2.5 Pro' },
+        { id: 'gpt-4.1', displayName: 'GPT-4.1' },
+        { id: 'gpt-4o', displayName: 'GPT-4o' },
+        { id: 'gpt-5-mini', displayName: 'GPT-5 mini' },
+        { id: 'raptor-mini', displayName: 'Raptor mini (Preview)' },
     ];
-    /** Emit all available Copilot models for the phone. */
+    /** Emit all available Copilot models for the phone, dynamically from the SDK. */
     async emitAvailableModels() {
-        const models = SessionManager.ALL_COPILOT_MODELS.filter((model) => !SessionManager.isBlockedModelId(model.id));
-        this.emit('models_available', models);
+        let sdkModels = [];
+        try {
+            if (!this.client) {
+                await this.startClient();
+            }
+            const modelInfos = await this.client.listModels();
+            console.log(`[PocketPilot] listModels() returned ${modelInfos.length} models: ${modelInfos.map(m => m.id).join(', ')}`);
+            sdkModels = modelInfos
+                .filter((m) => !SessionManager.isBlockedModelId(m.id))
+                .map((m) => ({
+                id: m.id,
+                displayName: m.name || m.id,
+                vendor: '',
+            }));
+        }
+        catch (err) {
+            console.log(`[PocketPilot] listModels() failed: ${err?.message}`);
+        }
+        // Merge: start with SDK models, then add known models the SDK missed
+        const seenIds = new Set(sdkModels.map(m => m.id.toLowerCase()));
+        const supplemented = [...sdkModels];
+        for (const known of SessionManager.KNOWN_COPILOT_MODELS) {
+            if (!seenIds.has(known.id.toLowerCase()) && !SessionManager.isBlockedModelId(known.id)) {
+                supplemented.push({ id: known.id, displayName: known.displayName, vendor: '' });
+                seenIds.add(known.id.toLowerCase());
+            }
+        }
+        console.log(`[PocketPilot] Emitting ${supplemented.length} models to phone: ${supplemented.map(m => m.id).join(', ')}`);
+        this.emit('models_available', supplemented);
     }
     // ── Persistence helpers ─────────────────────────────────────────
     savePreferences() {
@@ -12518,12 +12894,33 @@ async function activate(context) {
     session.on('done', () => {
         wsManager?.send({ type: 'done' });
         outputChannel?.appendLine('\n');
-        statusBar?.setConnected();
+        // Restore to the correct idle state
+        if (wsManager?.isConnected) {
+            statusBar?.setConnected();
+        }
+        else if (tunnelManager?.isRunning) {
+            statusBar?.setTunnelReady();
+        }
+        else {
+            statusBar?.setWaiting();
+        }
     });
     session.on('error', (code, message) => {
         wsManager?.send({ type: 'error', code, message });
         outputChannel?.appendLine(`[Error] ${code}: ${message}`);
+        // Brief error flash, then restore correct idle state
         statusBar?.setError('error');
+        setTimeout(() => {
+            if (wsManager?.isConnected) {
+                statusBar?.setConnected();
+            }
+            else if (tunnelManager?.isRunning) {
+                statusBar?.setTunnelReady();
+            }
+            else {
+                statusBar?.setWaiting();
+            }
+        }, 3000);
     });
     session.on('model_switched', (model) => {
         wsManager?.send({ type: 'model_switched', model });
@@ -12549,6 +12946,9 @@ async function activate(context) {
         wsManager?.send({ type: 'notification', title, body });
         outputChannel?.appendLine(`[${title}] ${body}`);
     });
+    session.on('activity', (label) => {
+        wsManager?.send({ type: 'activity', label });
+    });
     session.on('models_available', (models) => {
         wsManager?.send({ type: 'models_available', models });
     });
@@ -12556,24 +12956,31 @@ async function activate(context) {
     wsManager.on('connected', async () => {
         statusBar?.setConnected();
         vscode__WEBPACK_IMPORTED_MODULE_0__.window.showInformationMessage('PocketPilot: Phone connected!');
-        // Send initial state to the phone
+        // Always send the connected message first, even if workspace info lookup fails.
+        // Without this, the phone stays stuck at "authenticating" / "Disconnected".
+        let info = { project: 'Unknown', branch: 'main' };
         try {
-            const info = await session.getWorkspaceInfo();
-            wsManager?.send({
-                type: 'connected',
-                project: info.project,
-                branch: info.branch,
-                model: session.currentModel,
-                mode: session.currentMode,
-                hasHistory: session.hasHistory,
-            });
+            info = await session.getWorkspaceInfo();
         }
         catch { /* workspace info is best-effort */ }
+        wsManager?.send({
+            type: 'connected',
+            project: info.project,
+            branch: info.branch,
+            model: session.currentModel,
+            mode: session.currentMode,
+            hasHistory: session.hasHistory,
+        });
         // Send available models so the phone only shows what the user has access to
         session.emitAvailableModels().catch(() => { });
     });
     wsManager.on('disconnected', () => {
-        statusBar?.setWaiting();
+        if (tunnelManager?.isRunning) {
+            statusBar?.setTunnelReady();
+        }
+        else {
+            statusBar?.setWaiting();
+        }
         session?.resetSessionPermissions();
         session?.cancelCurrentTask().catch(() => { });
         vscode__WEBPACK_IMPORTED_MODULE_0__.window.showInformationMessage('PocketPilot: Phone disconnected');
@@ -12605,20 +13012,21 @@ async function activate(context) {
     });
     // ── Tunnel commands ─────────────────────────────────────────────
     const enableTunnel = vscode__WEBPACK_IMPORTED_MODULE_0__.commands.registerCommand('pocketpilot.enableTunnel', async () => {
-        const installed = await tunnelManager.checkInstalled();
-        if (!installed) {
-            vscode__WEBPACK_IMPORTED_MODULE_0__.window.showErrorMessage('PocketPilot: cloudflared not found. Install it from https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/');
-            return;
-        }
         try {
-            statusBar?.setBusy('starting tunnel…');
-            const url = await tunnelManager.start(WS_PORT);
-            statusBar?.setConnected();
-            vscode__WEBPACK_IMPORTED_MODULE_0__.window.showInformationMessage(`PocketPilot tunnel: ${url}`);
+            statusBar?.setBusy('Starting tunnel…');
+            const url = await tunnelManager.start(WS_PORT, (msg) => {
+                statusBar?.setBusy(msg);
+            });
+            statusBar?.setTunnelReady();
+            const via = tunnelManager.provider ? ` via ${tunnelManager.provider}` : '';
+            vscode__WEBPACK_IMPORTED_MODULE_0__.window.showInformationMessage(`✅ PocketPilot tunnel ready${via}: ${url}`);
         }
         catch (err) {
             statusBar?.setError('tunnel failed');
-            vscode__WEBPACK_IMPORTED_MODULE_0__.window.showErrorMessage(`PocketPilot tunnel error: ${err.message}`);
+            const action = await vscode__WEBPACK_IMPORTED_MODULE_0__.window.showErrorMessage(`PocketPilot tunnel error: ${err.message}`, 'Retry', 'Dismiss');
+            if (action === 'Retry') {
+                vscode__WEBPACK_IMPORTED_MODULE_0__.commands.executeCommand('pocketpilot.enableTunnel');
+            }
         }
     });
     const disableTunnel = vscode__WEBPACK_IMPORTED_MODULE_0__.commands.registerCommand('pocketpilot.disableTunnel', () => {
@@ -12692,11 +13100,33 @@ function handleIncomingMessage(msg) {
                 outputChannel?.show(true); // true = preserve editor focus
             }
             statusBar?.setBusy('generating…');
-            session?.sendPrompt(msg.content, msg.mode, msg.model);
+            session?.sendPrompt(msg.content, msg.mode, msg.model, msg.attachments).catch((err) => {
+                // Prevent unhandled promise rejection from crashing the extension host
+                const message = err?.message ?? 'Unknown error sending prompt';
+                outputChannel?.appendLine(`[Error] sendPrompt crashed: ${message}`);
+                wsManager?.send({ type: 'error', code: 'REQUEST_FAILED', message });
+                wsManager?.send({ type: 'done' });
+                if (wsManager?.isConnected) {
+                    statusBar?.setConnected();
+                }
+                else {
+                    statusBar?.setWaiting();
+                }
+            });
             break;
         case 'switch_model':
             statusBar?.setBusy('switching model…');
-            session?.switchModel(msg.model);
+            session?.switchModel(msg.model).catch((err) => {
+                outputChannel?.appendLine(`[Error] switchModel: ${err?.message}`);
+            }).finally(() => {
+                // Always restore status bar after model switch
+                if (wsManager?.isConnected) {
+                    statusBar?.setConnected();
+                }
+                else {
+                    statusBar?.setWaiting();
+                }
+            });
             break;
         case 'switch_mode':
             session?.switchMode(msg.mode);
@@ -12731,7 +13161,18 @@ function handleIncomingMessage(msg) {
             break;
         case 'cancel_task':
             session?.cancelCurrentTask().catch(() => { });
-            statusBar?.setConnected();
+            if (wsManager?.isConnected) {
+                statusBar?.setConnected();
+            }
+            else if (tunnelManager?.isRunning) {
+                statusBar?.setTunnelReady();
+            }
+            else {
+                statusBar?.setWaiting();
+            }
+            // IMPORTANT: Send 'done' so the phone's isGenerating flag resets.
+            // Without this, the phone UI stays stuck in "generating" state.
+            wsManager?.send({ type: 'done' });
             wsManager?.send({ type: 'notification', title: 'Cancelled', body: 'Task cancelled' });
             break;
         default:

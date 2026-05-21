@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import { execSync } from 'child_process';
-import { existsSync } from 'fs';
+import { existsSync, mkdirSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { EventEmitter } from 'events';
 import {
@@ -85,10 +85,14 @@ export class SessionManager extends EventEmitter {
     private _hasHistory = false;
     private isBusy = false;
 
-    // Pending permission/input forwarded to phone, resolved when phone responds
-    private pendingPermission: {
+    // Pending permission/input forwarded to phone, resolved when phone responds.
+    // Uses a queue so multiple concurrent SDK permission requests don't orphan
+    // each other's Promises (which was causing the "stuck forever" bug).
+    private pendingPermissionQueue: Array<{
+        id: string;
         resolve: (result: PermissionRequestResult) => void;
-    } | null = null;
+        kind?: string;
+    }> = [];
     private pendingUserInput: {
         resolve: (result: { answer: string; wasFreeform: boolean }) => void;
     } | null = null;
@@ -149,13 +153,7 @@ export class SessionManager extends EventEmitter {
             return undefined;
         }
 
-        // Canonicalize aliases like "GPT-4o" to the actual Copilot model id.
-        const canonical = SessionManager.ALL_COPILOT_MODELS.find((candidate) => {
-            return candidate.id.toLowerCase() === normalizedInput
-                || candidate.displayName.toLowerCase() === normalizedInput;
-        });
-
-        return canonical?.id ?? trimmed;
+        return trimmed;
     }
 
     private getPinnedModel(): string | undefined {
@@ -361,10 +359,20 @@ export class SessionManager extends EventEmitter {
             this.emit('chunk', event.data.deltaContent);
         }));
 
+        // Reasoning / thinking deltas → phone (like Claude's thinking UI)
+        this.eventUnsubs.push(session.on('assistant.reasoning_delta' as any, (event: any) => {
+            const content = event?.data?.deltaContent;
+            if (content) {
+                // Wrap reasoning in a blockquote so it renders as a "thinking" block
+                this.emit('chunk', content);
+            }
+        }));
+
         // Session idle → response complete
         this.eventUnsubs.push(session.on('session.idle', () => {
             if (this.isBusy) {
                 this.isBusy = false;
+                this.emit('activity', ''); // Clear activity status
                 this.emit('done');
 
                 // In plan mode, offer action buttons
@@ -400,12 +408,28 @@ export class SessionManager extends EventEmitter {
             }
 
             this.isBusy = false;
+            this.emit('activity', '');
             this.emit('error', 'SESSION_ERROR', message);
         }));
 
-        // Tool execution status (forward as notifications)
+        // Tool execution start → emit inline progress AND activity status
         this.eventUnsubs.push(session.on('tool.execution_start', (event) => {
-            this.emit('notification', 'Tool Running', `Running: ${event.data.toolName}`);
+            const toolName = event.data.toolName || 'tool';
+
+            // Format a human-readable activity label
+            const label = this.formatToolLabel(toolName);
+            this.emit('activity', label);
+            this.emit('notification', 'Tool Running', `Running: ${toolName}`);
+
+            // Emit inline thinking chunk so the user sees what's happening in the chat
+            this.emit('chunk', `\n\n> 🔧 **${label}**\n\n`);
+        }));
+
+        // Tool execution complete → update inline progress
+        this.eventUnsubs.push(session.on('tool.execution_complete' as any, (event: any) => {
+            const toolName = event?.data?.toolName || 'tool';
+            const label = this.formatToolLabel(toolName);
+            this.emit('activity', `✓ ${label}`);
         }));
 
         // Model changed by the session itself
@@ -416,9 +440,35 @@ export class SessionManager extends EventEmitter {
         }));
     }
 
+    /** Convert a raw tool name like 'edit_file' to a readable label like 'Editing file' */
+    private formatToolLabel(toolName: string): string {
+        const labels: Record<string, string> = {
+            'read_file': 'Reading file',
+            'edit_file': 'Editing file',
+            'write_file': 'Writing file',
+            'list_directory': 'Listing directory',
+            'search_files': 'Searching files',
+            'run_command': 'Running command',
+            'grep_search': 'Searching code',
+            'file_search': 'Searching files',
+            'execute_command': 'Running command',
+            'create_file': 'Creating file',
+            'delete_file': 'Deleting file',
+            'view': 'Reading file',
+            'bash': 'Running command',
+        };
+        return labels[toolName] || toolName.replace(/_/g, ' ');
+    }
+
     private async destroySession(): Promise<void> {
         for (const unsub of this.eventUnsubs) { unsub(); }
         this.eventUnsubs = [];
+
+        // Flush pending permission queue to prevent leaked Promises
+        for (const queued of this.pendingPermissionQueue) {
+            queued.resolve({ kind: 'denied-interactively-by-user' });
+        }
+        this.pendingPermissionQueue = [];
 
         if (this.session) {
             await this.session.disconnect().catch(() => { /* best effort */ });
@@ -428,7 +478,12 @@ export class SessionManager extends EventEmitter {
 
     // ── Core: send a prompt ─────────────────────────────────────────
 
-    async sendPrompt(content: string, mode?: 'ask' | 'agent' | 'plan', model?: string): Promise<void> {
+    async sendPrompt(
+        content: string,
+        mode?: 'ask' | 'agent' | 'plan',
+        model?: string,
+        attachments?: Array<{ name: string; mimeType: string; data: string }>,
+    ): Promise<void> {
         if (mode && mode !== this._currentMode) {
             this._currentMode = mode;
             this.savePreferences();
@@ -440,6 +495,29 @@ export class SessionManager extends EventEmitter {
         this._hasHistory = true;
 
         const previousModel = this._currentModel;
+
+        // Save image attachments to workspace temp dir so Copilot can read them
+        const sdkAttachments: Array<{ type: 'file'; path: string; displayName?: string }> = [];
+        if (attachments && attachments.length > 0) {
+            const wsFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+            if (wsFolder) {
+                const uploadDir = join(wsFolder, '.pocketpilot', 'uploads');
+                if (!existsSync(uploadDir)) {
+                    mkdirSync(uploadDir, { recursive: true });
+                }
+                for (const att of attachments) {
+                    try {
+                        const ext = att.name.split('.').pop() || 'jpg';
+                        const fileName = `upload-${Date.now()}.${ext}`;
+                        const filePath = join(uploadDir, fileName);
+                        writeFileSync(filePath, Buffer.from(att.data, 'base64'));
+                        sdkAttachments.push({ type: 'file', path: filePath, displayName: att.name });
+                    } catch (e) {
+                        // Skip failed attachments silently
+                    }
+                }
+            }
+        }
 
         try {
             let retriedAfterAuth = false;
@@ -460,7 +538,12 @@ export class SessionManager extends EventEmitter {
                         }
                     }
 
-                    await session.sendAndWait({ prompt: content }, 600_000);
+                    const msgOptions: any = { prompt: content };
+                    if (sdkAttachments.length > 0) {
+                        msgOptions.attachments = sdkAttachments;
+                    }
+
+                    await session.sendAndWait(msgOptions, 600_000);
                     break;
                 } catch (err: any) {
                     const msg = err?.message ?? '';
@@ -487,10 +570,15 @@ export class SessionManager extends EventEmitter {
                         const wasAutoRequested = (!perPromptModel || perPromptModel === 'auto') && this._currentModel === 'auto';
                         const failedModel = perPromptModel || this._currentModel;
 
-                        // Get available models from hardcoded list (SDK's listModels() is unreliable)
-                        const allAvailable = SessionManager.ALL_COPILOT_MODELS
-                            .filter((model) => !SessionManager.isBlockedModelId(model.id))
-                            .map(m => m.id);
+                        // Query the SDK for available models dynamically
+                        let allAvailable: string[] = [];
+                        try {
+                            const modelInfos = await this.client!.listModels();
+                            allAvailable = modelInfos
+                                .filter((m) => !SessionManager.isBlockedModelId(m.id))
+                                .filter((m) => !m.policy || m.policy.state !== 'disabled')
+                                .map(m => m.id);
+                        } catch { /* SDK call failed — will fall back to auto */ }
 
                         // Smart fallback logic:
                         // 1. If a Gemini model failed, try the other Gemini variant
@@ -499,17 +587,14 @@ export class SessionManager extends EventEmitter {
                         let fallbackModel: string | undefined;
 
                         if (failedModel && failedModel.toLowerCase().includes('gemini')) {
-                            // If one Gemini variant failed, try the other
                             const geminiModels = allAvailable.filter(m => m.toLowerCase().includes('gemini'));
                             fallbackModel = geminiModels.find(m => m !== failedModel);
                         }
 
-                        // If no Gemini alternative, safely pick gpt-4o or gpt-4 as a guaranteed fallback
                         if (!fallbackModel) {
                             const safeFallbacks = ['gpt-4o', 'gpt-4', 'gpt-5-mini'];
                             fallbackModel = safeFallbacks.find(safeId => allAvailable.includes(safeId));
                             
-                            // If still nothing, pick any available model
                             if (!fallbackModel) {
                                 fallbackModel = allAvailable.find((candidate) => 
                                     candidate.toLowerCase() !== 'auto' && candidate !== failedModel
@@ -526,7 +611,7 @@ export class SessionManager extends EventEmitter {
                         // Only notify the UI visually if the user explicitly asked for a specific model that failed
                         if (!wasAutoRequested) {
                             const fallbackLabel = this._currentModel === 'auto' ? 'Auto' : this._currentModel;
-                            this.emit('chunk', `\n\n> ⚠️ **Info:** Le modèle demandé n'est pas supporté par votre compte (Erreur 400). Basculement automatique vers **${fallbackLabel}**.\n\n`);
+                            this.emit('chunk', `\n\n> ⚠️ **Info:** The requested model is not supported by your account (Error 400). Automatically switching to **${fallbackLabel}**.\n\n`);
                         }
 
                         await this.destroySession();
@@ -643,56 +728,108 @@ export class SessionManager extends EventEmitter {
             return { kind: 'approved' };
         }
 
+        // In agent mode, auto-approve read-only operations so tools don't pile up.
+        // The user explicitly chose agent mode to let the AI work autonomously.
+        // Only truly destructive operations (write, shell) still prompt.
+        const readOnlyKinds = new Set(['read', 'mcp', 'url']);
+        if (this._currentMode === 'agent' && readOnlyKinds.has(request.kind)) {
+            return { kind: 'approved' };
+        }
+
         // Build a human-readable description of the request
         const description = this.describePermission(request);
+        const requestId = `perm_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 
-        // Forward to phone and wait for response
+        // Forward to phone and wait for response — queue-based so concurrent
+        // requests don't clobber each other.
         return new Promise<PermissionRequestResult>((resolve) => {
-            this.pendingPermission = { resolve };
-            this.emit('permission_request', request.kind, request.kind, description);
+            this.pendingPermissionQueue.push({ id: requestId, resolve, kind: request.kind });
+
+            // Only emit to the phone if this is the first item in the queue
+            // (i.e. no modal is currently showing). Otherwise the phone will
+            // be prompted when the current one is resolved.
+            if (this.pendingPermissionQueue.length === 1) {
+                this.emit('permission_request', requestId, request.kind, description);
+            }
         });
     }
 
     private describePermission(request: PermissionRequest): string {
+        const r = request as any;
+
+        // Helper: extract the best file identifier from the request
+        const getFile = (): string => {
+            // The SDK uses different field names depending on the version
+            const raw = r.filePath || r.fileName || r.path || r.file || r.uri || '';
+            if (!raw) { return 'unknown file'; }
+            // Show just the basename for readability, full path in parentheses
+            const parts = String(raw).split('/');
+            const base = parts[parts.length - 1];
+            return parts.length > 1 ? `${base} (${raw})` : base;
+        };
+
         switch (request.kind) {
             case 'shell':
-                return `Run command: ${(request as any).fullCommandText ?? 'shell command'}`;
+                return `Run command: ${r.fullCommandText || r.command || r.commandLine || 'shell command'}`;
             case 'write':
-                return `Write file: ${(request as any).fileName ?? 'unknown file'}`;
+                return `Write file: ${getFile()}`;
             case 'read':
-                return `Read file: ${(request as any).fileName ?? 'unknown file'}`;
+                return `Read file: ${getFile()}`;
             case 'mcp':
-                return `MCP tool: ${(request as any).toolName ?? 'unknown tool'}`;
+                return `MCP tool: ${r.toolName || r.name || 'unknown tool'}`;
             case 'url':
-                return `Fetch URL: ${(request as any).url ?? 'unknown URL'}`;
+                return `Fetch URL: ${r.url || 'unknown URL'}`;
             case 'custom-tool':
-                return `Custom tool: ${(request as any).toolName ?? 'unknown tool'}`;
+                return `Custom tool: ${r.toolName || r.name || 'unknown tool'}`;
             default:
                 return `Permission: ${request.kind}`;
         }
     }
 
     resolvePermission(_id: string, decision: string): void {
-        if (!this.pendingPermission) { return; }
+        if (this.pendingPermissionQueue.length === 0) { return; }
+
+        // Dequeue the first (currently visible) permission request
+        const current = this.pendingPermissionQueue.shift()!;
 
         let result: PermissionRequestResult;
         if (decision === 'allow' || decision === 'allow_session' || decision === 'allow_all') {
             result = { kind: 'approved' };
 
             // Remember the approval scope
-            if (decision === 'allow_session') {
-                // We don't have the kind here, but the pending permission was for a specific request
-                // Store it generically
+            if (decision === 'allow_session' && current.kind) {
+                this.sessionApprovals.set(current.kind, true);
             }
             if (decision === 'allow_all') {
                 this.allowAllSession = true;
+
+                // Auto-resolve everything else in the queue
+                for (const queued of this.pendingPermissionQueue) {
+                    queued.resolve({ kind: 'approved' });
+                }
+                this.pendingPermissionQueue = [];
             }
         } else {
             result = { kind: 'denied-interactively-by-user' };
         }
 
-        this.pendingPermission.resolve(result);
-        this.pendingPermission = null;
+        current.resolve(result);
+
+        // If there are more requests queued and we didn't just "allow all",
+        // auto-approve requests whose kind is now remembered, then emit the
+        // next one that still needs manual approval.
+        while (this.pendingPermissionQueue.length > 0) {
+            const next = this.pendingPermissionQueue[0];
+            if (this.allowAllSession || (next.kind && this.sessionApprovals.get(next.kind))) {
+                this.pendingPermissionQueue.shift()!;
+                next.resolve({ kind: 'approved' });
+            } else {
+                // Emit the next request to the phone
+                const desc = `Permission: ${next.kind ?? 'unknown'}`;
+                this.emit('permission_request', next.id, next.kind ?? 'unknown', desc);
+                break;
+            }
+        }
     }
 
     // ── User input handling (SDK → phone → SDK) ─────────────────────
@@ -723,6 +860,11 @@ export class SessionManager extends EventEmitter {
     resetSessionPermissions(): void {
         this.sessionApprovals.clear();
         this.allowAllSession = false;
+        // Deny any outstanding permission requests so their Promises don't leak
+        for (const queued of this.pendingPermissionQueue) {
+            queued.resolve({ kind: 'denied-interactively-by-user' });
+        }
+        this.pendingPermissionQueue = [];
     }
 
     // ── Action buttons (plan mode) ──────────────────────────────────
@@ -803,32 +945,55 @@ export class SessionManager extends EventEmitter {
     }
 
     /**
-     * Complete list of all Copilot models, matching the Copilot UI exactly.
-     * The SDK's listModels() is unreliable and misses many models,
-     * so we hardcode the full list here.
+     * Known Copilot models — used as a supplement when the SDK's listModels()
+     * doesn't return the full set (which it often doesn't).
+     * Models the user doesn't have access to will fail gracefully at use time.
      */
-    private static readonly ALL_COPILOT_MODELS: Array<{ id: string; displayName: string; vendor: string }> = [
-        // ── Main models ──
-        { id: 'gemini-2.5-pro',     displayName: 'Gemini 2.5 Pro',            vendor: 'google' },
-        { id: 'gemini-3.1-pro',     displayName: 'Gemini 3.1 Pro (Preview)',   vendor: 'google' },
-        { id: 'gpt-4.1',            displayName: 'GPT-4.1',                   vendor: 'openai' },
-        { id: 'gpt-5.3-codex',      displayName: 'GPT-5.3-Codex',             vendor: 'openai' },
-        // ── Other models ──
-        { id: 'claude-haiku-4.5',   displayName: 'Claude Haiku 4.5',          vendor: 'anthropic' },
-        { id: 'gemini-3-flash',     displayName: 'Gemini 3 Flash (Preview)',   vendor: 'google' },
-        { id: 'gpt-4o',             displayName: 'GPT-4o',                    vendor: 'openai' },
-        { id: 'gpt-5-mini',         displayName: 'GPT-5 mini',                vendor: 'openai' },
-        { id: 'gpt-5.2',            displayName: 'GPT-5.2',                   vendor: 'openai' },
-        { id: 'gpt-5.2-codex',      displayName: 'GPT-5.2-Codex',             vendor: 'openai' },
-        { id: 'gpt-5.4-mini',       displayName: 'GPT-5.4 mini',              vendor: 'openai' },
-        { id: 'grok-code-fast-1',   displayName: 'Grok Code Fast 1',          vendor: 'xai' },
-        { id: 'raptor-mini',        displayName: 'Raptor mini (Preview)',      vendor: 'microsoft' },
+    private static readonly KNOWN_COPILOT_MODELS: Array<{ id: string; displayName: string }> = [
+        { id: 'claude-haiku-4.5',   displayName: 'Claude Haiku 4.5'         },
+        { id: 'gemini-2.5-pro',     displayName: 'Gemini 2.5 Pro'           },
+        { id: 'gpt-4.1',            displayName: 'GPT-4.1'                  },
+        { id: 'gpt-4o',             displayName: 'GPT-4o'                   },
+        { id: 'gpt-5-mini',         displayName: 'GPT-5 mini'               },
+        { id: 'raptor-mini',        displayName: 'Raptor mini (Preview)'    },
     ];
 
-    /** Emit all available Copilot models for the phone. */
+    /** Emit all available Copilot models for the phone, dynamically from the SDK. */
     async emitAvailableModels(): Promise<void> {
-        const models = SessionManager.ALL_COPILOT_MODELS.filter((model) => !SessionManager.isBlockedModelId(model.id));
-        this.emit('models_available', models);
+        let sdkModels: Array<{ id: string; displayName: string; vendor: string }> = [];
+
+        try {
+            if (!this.client) {
+                await this.startClient();
+            }
+            const modelInfos = await this.client!.listModels();
+
+            console.log(`[PocketPilot] listModels() returned ${modelInfos.length} models: ${modelInfos.map(m => m.id).join(', ')}`);
+
+            sdkModels = modelInfos
+                .filter((m) => !SessionManager.isBlockedModelId(m.id))
+                .map((m) => ({
+                    id: m.id,
+                    displayName: m.name || m.id,
+                    vendor: '',
+                }));
+        } catch (err) {
+            console.log(`[PocketPilot] listModels() failed: ${(err as Error)?.message}`);
+        }
+
+        // Merge: start with SDK models, then add known models the SDK missed
+        const seenIds = new Set(sdkModels.map(m => m.id.toLowerCase()));
+        const supplemented = [...sdkModels];
+
+        for (const known of SessionManager.KNOWN_COPILOT_MODELS) {
+            if (!seenIds.has(known.id.toLowerCase()) && !SessionManager.isBlockedModelId(known.id)) {
+                supplemented.push({ id: known.id, displayName: known.displayName, vendor: '' });
+                seenIds.add(known.id.toLowerCase());
+            }
+        }
+
+        console.log(`[PocketPilot] Emitting ${supplemented.length} models to phone: ${supplemented.map(m => m.id).join(', ')}`);
+        this.emit('models_available', supplemented);
     }
 
     // ── Persistence helpers ─────────────────────────────────────────

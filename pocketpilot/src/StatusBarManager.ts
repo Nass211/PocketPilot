@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 
-type StatusState = 'waiting' | 'connected' | 'busy' | 'error';
+type StatusState = 'waiting' | 'connected' | 'tunnel_ready' | 'busy' | 'error';
 
 export class StatusBarManager {
     private item: vscode.StatusBarItem;
@@ -30,6 +30,12 @@ export class StatusBarManager {
         this.item.text = `$(broadcast) PocketPilot — ${label} connected`;
         this.item.backgroundColor = undefined;
         this.item.tooltip = 'Phone is connected';
+    }
+
+    setTunnelReady(): void {
+        this.item.text = '$(broadcast) PocketPilot — tunnel ready';
+        this.item.backgroundColor = undefined;
+        this.item.tooltip = 'Tunnel active — scan QR to connect phone';
     }
 
     setBusy(task: string): void {

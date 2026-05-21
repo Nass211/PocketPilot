@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { Modal, View, Text, TouchableOpacity, StyleSheet, FlatList, TouchableWithoutFeedback } from 'react-native';
+import { Modal, View, Text, TouchableOpacity, StyleSheet, FlatList, Pressable } from 'react-native';
 import { useTheme, ThemeColors } from '../context/ThemeContext';
 import { AvailableModel } from '../hooks/useWebSocket';
 
@@ -9,23 +9,8 @@ interface ModelSelectorProps {
   availableModels?: AvailableModel[];
 }
 
-// Fallback models if the extension hasn't sent available models yet
-const FALLBACK_MODELS = [
-  'auto',
-  'gemini-2.5-pro',
-  'gemini-3.1-pro',
-  'gpt-4.1',
-  'gpt-5.3-codex',
-  'claude-haiku-4.5',
-  'gemini-3-flash',
-  'gpt-4o',
-  'gpt-5-mini',
-  'gpt-5.2',
-  'gpt-5.2-codex',
-  'gpt-5.4-mini',
-  'grok-code-fast-1',
-  'raptor-mini',
-];
+// No fallback models — we rely on the extension sending available models via the SDK.
+// If no models have been received yet, only 'auto' is shown.
 
 const isBlockedModel = (model: string) => model.toLowerCase().includes('sonnet');
 
@@ -34,14 +19,13 @@ export default function ModelSelector({ currentModel, onModelChange, availableMo
   const styles = useMemo(() => createStyles(colors), [colors]);
   const [modalVisible, setModalVisible] = useState(false);
 
-  // Use dynamic models from extension if available, otherwise fallback
+  // Use dynamic models from extension if available, otherwise show only 'auto'
   const models = useMemo(() => {
     if (availableModels && availableModels.length > 0) {
-      // Always include 'auto' at the top, then the available models
       const ids = availableModels.map(m => m.id).filter(id => !isBlockedModel(id));
       return ['auto', ...ids];
     }
-    return FALLBACK_MODELS.filter(model => !isBlockedModel(model));
+    return ['auto'];
   }, [availableModels]);
 
   // Build a display name map for nicer labels
@@ -73,27 +57,35 @@ export default function ModelSelector({ currentModel, onModelChange, availableMo
         animationType="slide"
         onRequestClose={() => setModalVisible(false)}
       >
-        <TouchableWithoutFeedback onPress={() => setModalVisible(false)}>
-          <View style={styles.modalOverlay}>
-            <View style={styles.bottomSheet}>
-              <Text style={styles.sheetTitle}>Choose a model</Text>
-              <FlatList
-                data={models}
-                keyExtractor={(item) => item}
-                renderItem={({ item }) => (
-                  <TouchableOpacity 
-                    style={[styles.item, currentModel === item && styles.itemActive]} 
-                    onPress={() => selectModel(item)}
-                  >
-                    <Text style={[styles.itemText, currentModel === item && styles.itemTextActive]}>
-                      {displayNames[item] || item}
-                    </Text>
-                  </TouchableOpacity>
-                )}
-              />
+        <View style={styles.modalOverlay}>
+          {/* Backdrop: tapping here dismisses the modal */}
+          <Pressable style={styles.backdrop} onPress={() => setModalVisible(false)} />
+
+          {/* Bottom sheet: touch events here are NOT intercepted — FlatList scrolls freely */}
+          <View style={styles.bottomSheet}>
+            <View style={styles.dragHandleContainer}>
+              <View style={styles.dragHandle} />
             </View>
+            <Text style={styles.sheetTitle}>Choose a model</Text>
+            <FlatList
+              data={models}
+              keyExtractor={(item) => item}
+              bounces={true}
+              showsVerticalScrollIndicator={true}
+              contentContainerStyle={styles.listContent}
+              renderItem={({ item }) => (
+                <TouchableOpacity 
+                  style={[styles.item, currentModel === item && styles.itemActive]} 
+                  onPress={() => selectModel(item)}
+                >
+                  <Text style={[styles.itemText, currentModel === item && styles.itemTextActive]}>
+                    {displayNames[item] || item}
+                  </Text>
+                </TouchableOpacity>
+              )}
+            />
           </View>
-        </TouchableWithoutFeedback>
+        </View>
       </Modal>
     </>
   );
@@ -120,12 +112,27 @@ const createStyles = (colors: ThemeColors) => StyleSheet.create({
     justifyContent: 'flex-end',
     backgroundColor: 'rgba(0, 0, 0, 0.5)',
   },
+  backdrop: {
+    flex: 1,
+  },
   bottomSheet: {
     backgroundColor: colors.surface,
     borderTopLeftRadius: 16,
     borderTopRightRadius: 16,
-    padding: 16,
-    maxHeight: '60%',
+    paddingHorizontal: 16,
+    paddingBottom: 32, // safe area for bottom nav
+    maxHeight: '65%',
+  },
+  dragHandleContainer: {
+    alignItems: 'center',
+    paddingVertical: 10,
+  },
+  dragHandle: {
+    width: 36,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: colors.textSecondary || '#666',
+    opacity: 0.5,
   },
   sheetTitle: {
     color: colors.textSecondary,
@@ -134,6 +141,9 @@ const createStyles = (colors: ThemeColors) => StyleSheet.create({
     marginBottom: 12,
     textAlign: 'center',
   },
+  listContent: {
+    paddingBottom: 16,
+  },
   item: {
     paddingVertical: 16,
     borderBottomWidth: 1,
@@ -141,6 +151,7 @@ const createStyles = (colors: ThemeColors) => StyleSheet.create({
   },
   itemActive: {
     backgroundColor: colors.accent + '22',
+    borderRadius: 8,
   },
   itemText: {
     color: colors.text,
@@ -152,3 +163,4 @@ const createStyles = (colors: ThemeColors) => StyleSheet.create({
     fontWeight: 'bold',
   },
 });
+

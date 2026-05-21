@@ -4,14 +4,16 @@ import { useTheme, ThemeColors } from '../context/ThemeContext';
 
 interface StreamingIndicatorProps {
   visible: boolean;
+  activity?: string;
 }
 
-export default function StreamingIndicator({ visible }: StreamingIndicatorProps) {
+export default function StreamingIndicator({ visible, activity }: StreamingIndicatorProps) {
   const { colors } = useTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
   const dot1 = useRef(new Animated.Value(0)).current;
   const dot2 = useRef(new Animated.Value(0)).current;
   const dot3 = useRef(new Animated.Value(0)).current;
+  const pulseAnim = useRef(new Animated.Value(0.6)).current;
 
   useEffect(() => {
     if (!visible) return;
@@ -37,24 +39,45 @@ export default function StreamingIndicator({ visible }: StreamingIndicatorProps)
       ]);
     };
 
+    // Pulsing glow for the activity indicator
+    const pulse = Animated.loop(
+      Animated.sequence([
+        Animated.timing(pulseAnim, {
+          toValue: 1,
+          duration: 800,
+          useNativeDriver: true,
+        }),
+        Animated.timing(pulseAnim, {
+          toValue: 0.4,
+          duration: 800,
+          useNativeDriver: true,
+        }),
+      ])
+    );
+
     Animated.parallel([
       animateDot(dot1, 0),
       animateDot(dot2, 200),
       animateDot(dot3, 400),
+      pulse,
     ]).start();
 
     return () => {
       dot1.stopAnimation();
       dot2.stopAnimation();
       dot3.stopAnimation();
+      pulseAnim.stopAnimation();
     };
-  }, [visible, dot1, dot2, dot3]);
+  }, [visible, dot1, dot2, dot3, pulseAnim]);
 
   if (!visible) return null;
 
+  const label = activity || 'Copilot is thinking';
+
   return (
     <View style={styles.container}>
-      <Text style={styles.text}>Copilot écrit</Text>
+      <Animated.View style={[styles.activityDot, { opacity: pulseAnim }]} />
+      <Text style={styles.text} numberOfLines={1}>{label}</Text>
       <View style={styles.dotsRow}>
         <Animated.View style={[styles.dot, { transform: [{ translateY: dot1 }] }]} />
         <Animated.View style={[styles.dot, { transform: [{ translateY: dot2 }] }]} />
@@ -69,13 +92,21 @@ const createStyles = (colors: ThemeColors) => StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     paddingHorizontal: 24,
-    paddingVertical: 12,
+    paddingVertical: 10,
+  },
+  activityDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: '#58a6ff',
+    marginRight: 8,
   },
   text: {
     color: colors.textSecondary,
     fontSize: 13,
     fontStyle: 'italic',
     marginRight: 8,
+    flex: 1,
   },
   dotsRow: {
     flexDirection: 'row',

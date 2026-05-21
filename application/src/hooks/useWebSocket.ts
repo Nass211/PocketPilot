@@ -35,6 +35,7 @@ export function useWebSocket(initialCallbacks: WebSocketCallbacks = {}) {
   const [hasHistory, setHasHistory] = useState<boolean>(false);
   const [cliStatus, setCliStatus] = useState<CliStatus>('unknown');
   const [availableModels, setAvailableModels] = useState<AvailableModel[]>([]);
+  const [activity, setActivity] = useState<string>('');
 
   const wsRef = useRef<WebSocketService | null>(null);
   
@@ -60,10 +61,8 @@ export function useWebSocket(initialCallbacks: WebSocketCallbacks = {}) {
         }
       },
       onMessage: (msg: WebSocketMessage) => {
-        if (msg.type === 'ping') {
-          wsRef.current?.send({ type: 'pong' });
-          return;
-        }
+        // Note: 'ping' messages are already handled in WebSocketService.handleMessage()
+        // and are never forwarded here.
         
         switch (msg.type) {
           case 'connected':
@@ -117,6 +116,9 @@ export function useWebSocket(initialCallbacks: WebSocketCallbacks = {}) {
               setAvailableModels(msg.models);
             }
             break;
+          case 'activity':
+            setActivity(msg.label || '');
+            break;
         }
       }
     });
@@ -151,6 +153,7 @@ export function useWebSocket(initialCallbacks: WebSocketCallbacks = {}) {
     hasHistory,
     cliStatus,
     availableModels,
+    activity,
     connect,
     disconnect,
     send,

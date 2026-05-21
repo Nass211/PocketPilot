@@ -13,21 +13,33 @@ export default function SettingsScreen({ navigation, route }: any) {
   const [workspaceFiles, setWorkspaceFiles] = useState<string[]>([]);
 
   useEffect(() => {
-     // Optional: If you had a listener in ws for 'workspace_info' you could set it
      if (ws?.send) {
        ws.send({ type: 'get_workspace_info' });
      }
   }, []);
 
+  // Derive connection status text from ws.status
+  const statusLabel = useMemo(() => {
+    switch (ws.status) {
+      case 'connected': return 'Connected';
+      case 'connecting': return 'Connecting…';
+      case 'authenticating': return 'Authenticating…';
+      case 'reconnecting': return 'Reconnecting…';
+      default: return 'Disconnected';
+    }
+  }, [ws.status]);
+
+  const statusColor = ws.status === 'connected' ? '#4caf50' : '#ff9800';
+
   const handleDisconnect = () => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
     Alert.alert(
-      "Déconnexion",
-      "Êtes-vous sûr de vouloir vous déconnecter de Copilot ?",
+      "Disconnect",
+      "Are you sure you want to disconnect from Copilot?",
       [
-        { text: "Annuler", style: "cancel" },
+        { text: "Cancel", style: "cancel" },
         { 
-          text: "Déconnecter", 
+          text: "Disconnect", 
           style: "destructive",
           onPress: () => {
             ws.disconnect();
@@ -41,16 +53,15 @@ export default function SettingsScreen({ navigation, route }: any) {
   const handleClearHistory = () => {
      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
      Alert.alert(
-       "Effacer l'historique",
-       "Cette action supprimera tous les messages actuels. Continuer ?",
+       "Clear History",
+       "This will delete all current messages. Continue?",
        [
-         { text: "Annuler", style: "cancel" },
+         { text: "Cancel", style: "cancel" },
          {
-           text: "Effacer",
+           text: "Clear",
            style: "destructive",
            onPress: () => {
               ws.send({ type: 'clear_history' });
-              // Needs to clear local messages array in ChatScreen.
               if (route.params?.onClear) {
                 route.params.onClear();
               }
@@ -64,27 +75,27 @@ export default function SettingsScreen({ navigation, route }: any) {
   return (
     <SafeAreaView style={styles.container} edges={['bottom', 'left', 'right']}>
       <ScrollView>
-        <Text style={styles.sectionTitle}>Connexion Active</Text>
+        <Text style={styles.sectionTitle}>Active Connection</Text>
         <View style={styles.card}>
           <View style={styles.row}>
-            <Text style={styles.label}>Statut</Text>
-            <Text style={styles.value}>{ws.status}</Text>
+            <Text style={styles.label}>Status</Text>
+            <Text style={[styles.value, { color: statusColor }]}>{statusLabel}</Text>
           </View>
           <View style={styles.row}>
-            <Text style={styles.label}>Projet</Text>
+            <Text style={styles.label}>Project</Text>
             <Text style={styles.value}>{ws.project || 'N/A'}</Text>
           </View>
           <View style={styles.row}>
-            <Text style={styles.label}>Branche</Text>
+            <Text style={styles.label}>Branch</Text>
             <Text style={styles.value}>{ws.branch || 'main'}</Text>
           </View>
           
           <TouchableOpacity style={styles.disconnectButton} onPress={handleDisconnect}>
-            <Text style={styles.disconnectText}>Déconnecter</Text>
+            <Text style={styles.disconnectText}>Disconnect</Text>
           </TouchableOpacity>
         </View>
 
-        <Text style={styles.sectionTitle}>Espace de Travail</Text>
+        <Text style={styles.sectionTitle}>Workspace</Text>
         <View style={styles.card}>
           <TouchableOpacity 
              style={styles.actionRow} 
@@ -93,21 +104,21 @@ export default function SettingsScreen({ navigation, route }: any) {
                 ws.send({ type: 'get_workspace_info' });
              }}
           >
-            <Text style={styles.actionText}>Rafraîchir workspace</Text>
+            <Text style={styles.actionText}>Refresh workspace</Text>
           </TouchableOpacity>
         </View>
 
-        <Text style={styles.sectionTitle}>Historique & Données</Text>
+        <Text style={styles.sectionTitle}>History & Data</Text>
         <View style={styles.card}>
           <TouchableOpacity style={styles.actionRow} onPress={handleClearHistory}>
-            <Text style={[styles.actionText, { color: '#FF3B30' }]}>Effacer l'historique global</Text>
+            <Text style={[styles.actionText, { color: '#FF3B30' }]}>Clear all history</Text>
           </TouchableOpacity>
         </View>
 
-        <Text style={styles.sectionTitle}>Apparence</Text>
+        <Text style={styles.sectionTitle}>Appearance</Text>
         <View style={styles.card}>
           <View style={styles.row}>
-            <Text style={styles.label}>Mode Sombre</Text>
+            <Text style={styles.label}>Dark Mode</Text>
             <Switch
                value={theme === 'dark'}
                onValueChange={toggleTheme}
@@ -163,7 +174,7 @@ const createStyles = (colors: ThemeColors) => StyleSheet.create({
     alignItems: 'center',
   },
   disconnectText: {
-    color: '#FF3B30', // standard danger color
+    color: '#FF3B30',
     fontSize: 16,
     fontWeight: '600',
   },

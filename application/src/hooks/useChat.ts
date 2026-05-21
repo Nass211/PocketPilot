@@ -33,7 +33,42 @@ export const useChat = (ws?: any) => {
     setIsGenerating(true);
 
     console.log('Sending prompt:', content);
-    ws?.send({ type: 'prompt', content, mode, model });
+
+    // Convert all attachments (images, PDFs, text files, etc.) to base64 before
+    // sending — local file URIs are not accessible on the extension side.
+    const prepareAttachments = async () => {
+      if (!attachments || attachments.length === 0) return undefined;
+      const prepared = await Promise.all(
+        attachments.map(async (a) => {
+          try {
+            const response = await fetch(a.uri);
+            const blob = await response.blob();
+            const base64: string = await new Promise((resolve, reject) => {
+              const reader = new FileReader();
+              reader.onloadend = () => resolve(reader.result as string);
+              reader.onerror = reject;
+              reader.readAsDataURL(blob);
+            });
+            // base64 is "data:<mime>;base64,..." — strip the prefix for the extension
+            const rawBase64 = base64.split(',')[1] || base64;
+            return { name: a.name, mimeType: a.mimeType, data: rawBase64 };
+          } catch {
+            return { name: a.name, mimeType: a.mimeType, data: null };
+          }
+        })
+      );
+      return prepared.filter(a => a.data !== null);
+    };
+
+    prepareAttachments().then((prepared) => {
+      ws?.send({
+        type: 'prompt',
+        content,
+        mode,
+        model,
+        attachments: prepared && prepared.length > 0 ? prepared : undefined,
+      });
+    });
   }, [ws]);
 
   const onChunk = useCallback((content: string) => {

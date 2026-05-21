@@ -3,7 +3,7 @@
 export type IncomingMessage =
     | { type: 'auth'; token: string }
     | { type: 'pong' }
-    | { type: 'prompt'; content: string; mode: 'ask' | 'agent' | 'plan'; model?: string }
+    | { type: 'prompt'; content: string; mode: 'ask' | 'agent' | 'plan'; model?: string; attachments?: Array<{ name: string; mimeType: string; data: string }> }
     | { type: 'permission'; id: string; decision: 'allow' | 'allow_session' | 'allow_all' | 'deny' }
     | { type: 'user_input'; answer: string }
     | { type: 'action'; action: 'start_implementation' | 'revise_plan' | 'cancel' | 'accept_diff' | 'reject_diff'; diffId?: string }
@@ -36,4 +36,5 @@ export type OutgoingMessage =
     | { type: 'error'; code: string; message: string }
     | { type: 'cli_status'; status: 'running' | 'crashed' | 'reconnecting' }
     | { type: 'notification'; title: string; body: string }
+    | { type: 'activity'; label: string }
     | { type: 'models_available'; models: { id: string; displayName: string; vendor: string }[] };

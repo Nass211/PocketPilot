@@ -2,7 +2,7 @@ import React from 'react';
 import { useEffect, useState, useRef, useCallback, useMemo } from 'react';
 import { 
   View, Text, TextInput, TouchableOpacity, FlatList, Image,
-  StyleSheet, KeyboardAvoidingView, Platform, Alert, Animated, Easing, Pressable, ScrollView
+  StyleSheet, KeyboardAvoidingView, Platform, Alert, Animated, ScrollView
 } from 'react-native';
 import { useAppContext } from '../context/AppContext';
 import { useChat } from '../hooks/useChat';
@@ -23,7 +23,7 @@ import * as ImagePicker from 'expo-image-picker';
 import * as DocumentPicker from 'expo-document-picker';
 import { Audio } from 'expo-av';
 import Logo from '../components/Logo';
-import { transcribeAudio, analyzeImage } from '../services/groqService';
+import { transcribeAudio } from '../services/groqService';
 
 export default function ChatScreen({ navigation, route }: any) {
   const ws = useAppContext();
@@ -44,14 +44,6 @@ export default function ChatScreen({ navigation, route }: any) {
   const [actions, setActions] = useState<ActionButtonPayload[]>([]);
   const audioRecordingRef = useRef<Audio.Recording | null>(null);
 
-  // Voice animation refs
-  const pulseAnim = useRef(new Animated.Value(1)).current;
-  const waveAnims = useRef(
-    Array.from({ length: 7 }, () => new Animated.Value(0.3))
-  ).current;
-  const pulseLoopRef = useRef<Animated.CompositeAnimation | null>(null);
-  const waveLoopRef = useRef<Animated.CompositeAnimation | null>(null);
-
   // Non-blocking toast notification state
   const [toastText, setToastText] = useState<string>('');
   const toastOpacity = useRef(new Animated.Value(0)).current;
@@ -59,118 +51,66 @@ export default function ChatScreen({ navigation, route }: any) {
 
   const chat = useChat(ws);
 
-  // ── Voice animation helpers ──
-  const startPulseAnimation = useCallback(() => {
-    const loop = Animated.loop(
-      Animated.sequence([
-        Animated.timing(pulseAnim, { toValue: 1.25, duration: 600, easing: Easing.inOut(Easing.ease), useNativeDriver: true }),
-        Animated.timing(pulseAnim, { toValue: 1, duration: 600, easing: Easing.inOut(Easing.ease), useNativeDriver: true }),
-      ])
-    );
-    pulseLoopRef.current = loop;
-    loop.start();
-  }, [pulseAnim]);
+  // ── Voice recording handlers (ChatGPT-style: tap to toggle, no auto-send) ──
+  const handleMicToggle = useCallback(async () => {
+    if (voiceState === 'recording') {
+      // ── Stop recording & transcribe ──
+      const recording = audioRecordingRef.current;
+      if (!recording) { setVoiceState('idle'); return; }
 
-  const stopPulseAnimation = useCallback(() => {
-    pulseLoopRef.current?.stop();
-    pulseAnim.setValue(1);
-  }, [pulseAnim]);
+      try {
+        await recording.stopAndUnloadAsync();
+      } catch { /* already stopped */ }
 
-  const startWaveAnimation = useCallback(() => {
-    const animations = waveAnims.map((anim, i) =>
-      Animated.loop(
-        Animated.sequence([
-          Animated.timing(anim, { toValue: 1, duration: 300 + i * 80, easing: Easing.inOut(Easing.ease), useNativeDriver: true }),
-          Animated.timing(anim, { toValue: 0.3, duration: 300 + i * 80, easing: Easing.inOut(Easing.ease), useNativeDriver: true }),
-        ])
-      )
-    );
-    const parallel = Animated.parallel(animations);
-    waveLoopRef.current = parallel;
-    parallel.start();
-  }, [waveAnims]);
+      const uri = recording.getURI();
+      audioRecordingRef.current = null;
+      await Audio.setAudioModeAsync({ allowsRecordingIOS: false, playsInSilentModeIOS: true });
 
-  const stopWaveAnimation = useCallback(() => {
-    waveLoopRef.current?.stop();
-    waveAnims.forEach(a => a.setValue(0.3));
-  }, [waveAnims]);
-
-  // ── Voice recording handlers ──
-  const handleVoicePressIn = useCallback(async () => {
-    try {
-      const permission = await Audio.requestPermissionsAsync();
-      if (!permission.granted) {
-        Alert.alert('Permission requise', 'Autorisez le micro pour enregistrer.');
+      if (!uri) {
+        setVoiceState('idle');
+        Alert.alert('Error', 'Audio file not found.');
         return;
       }
 
-      // Clean up any leftover recording to avoid "Only one Recording object" error
-      if (audioRecordingRef.current) {
-        try {
-          await audioRecordingRef.current.stopAndUnloadAsync();
-        } catch (_) { /* already stopped */ }
-        audioRecordingRef.current = null;
-      }
+      setVoiceState('transcribing');
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
 
-      await Audio.setAudioModeAsync({ allowsRecordingIOS: true, playsInSilentModeIOS: true });
-
-      // Use createAsync (modern API) instead of new + prepare + start
-      const { recording } = await Audio.Recording.createAsync(
-        Audio.RecordingOptionsPresets.HIGH_QUALITY
-      );
-      audioRecordingRef.current = recording;
-      setVoiceState('recording');
-      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-      startPulseAnimation();
-      startWaveAnimation();
-    } catch (e) {
-      console.error('Failed to start recording:', e);
-      Alert.alert('Erreur', 'Impossible de démarrer l\'enregistrement.');
-    }
-  }, [startPulseAnimation, startWaveAnimation]);
-
-  const handleVoicePressOut = useCallback(async () => {
-    const recording = audioRecordingRef.current;
-    if (!recording || voiceState !== 'recording') return;
-
-    stopPulseAnimation();
-    stopWaveAnimation();
-
-    try {
-      await recording.stopAndUnloadAsync();
-    } catch (e) { /* already stopped */ }
-
-    const uri = recording.getURI();
-    audioRecordingRef.current = null;
-    await Audio.setAudioModeAsync({ allowsRecordingIOS: false, playsInSilentModeIOS: true });
-
-    if (!uri) {
-      setVoiceState('idle');
-      Alert.alert('Erreur', 'Fichier audio introuvable.');
-      return;
-    }
-
-    // Transcription phase
-    setVoiceState('transcribing');
-    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-
-    try {
-      const text = await transcribeAudio(uri);
-      setInput(text);
-      // Brief delay so user sees the transcribed text, then auto-send
-      setTimeout(() => {
-        const modelToSend = overrideModel ? currentModel : undefined;
-        setActions([]);
-        chat.sendPrompt(text, currentMode, modelToSend);
-        setInput('');
-        setOverrideModel(false);
+      try {
+        const text = await transcribeAudio(uri);
+        // Place transcribed text in the input field — do NOT auto-send.
+        setInput((prev) => (prev ? prev + ' ' + text : text));
         setVoiceState('idle');
-      }, 400);
-    } catch (e: any) {
-      setVoiceState('idle');
-      Alert.alert('Erreur de transcription', e.message || 'Échec de la transcription audio.');
+      } catch (e: any) {
+        setVoiceState('idle');
+        Alert.alert('Transcription Error', e.message || 'Audio transcription failed.');
+      }
+    } else if (voiceState === 'idle') {
+      // ── Start recording ──
+      try {
+        const permission = await Audio.requestPermissionsAsync();
+        if (!permission.granted) {
+          Alert.alert('Permission Required', 'Please allow microphone access to record.');
+          return;
+        }
+
+        if (audioRecordingRef.current) {
+          try { await audioRecordingRef.current.stopAndUnloadAsync(); } catch { }
+          audioRecordingRef.current = null;
+        }
+
+        await Audio.setAudioModeAsync({ allowsRecordingIOS: true, playsInSilentModeIOS: true });
+        const { recording } = await Audio.Recording.createAsync(
+          Audio.RecordingOptionsPresets.HIGH_QUALITY
+        );
+        audioRecordingRef.current = recording;
+        setVoiceState('recording');
+        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+      } catch (e) {
+        console.error('Failed to start recording:', e);
+        Alert.alert('Error', 'Could not start recording.');
+      }
     }
-  }, [voiceState, stopPulseAnimation, stopWaveAnimation, overrideModel, currentModel, currentMode, chat]);
+  }, [voiceState]);
 
   useEffect(() => {
     return () => {
@@ -245,23 +185,10 @@ export default function ChatScreen({ navigation, route }: any) {
     setActions([]);
 
     // Send only the user's text (no raw URIs)
-    const content = input.trim() || (attachments.length > 0 ? '(pièce jointe)' : '');
+    const content = input.trim() || (attachments.length > 0 ? '(attachment)' : '');
     
     // Pass attachments as structured data for visual display in bubble
     chat.sendPrompt(content, currentMode, modelToSend, attachments.length > 0 ? attachments : undefined);
-
-    // If there are image attachments, analyze them via Groq vision
-    const imageAttachments = attachments.filter(a => a.type === 'image');
-    if (imageAttachments.length > 0) {
-      imageAttachments.forEach(async (img) => {
-        try {
-          const analysis = await analyzeImage(img.uri, input.trim() || 'Décris cette image en détail.');
-          chat.onChunk(analysis);
-        } catch (e: any) {
-          chat.onChunk('\n\n⚠️ Erreur analyse image: ' + (e.message || 'Échec'));
-        }
-      });
-    }
 
     setInput('');
     setAttachments([]);
@@ -283,14 +210,14 @@ export default function ChatScreen({ navigation, route }: any) {
     try {
       if (type === 'audio') {
         // Trigger voice recording
-        handleVoicePressIn();
+        handleMicToggle();
         return;
       }
 
       if (type === 'image') {
         const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
         if (!permission.granted) {
-          Alert.alert('Permission requise', 'Autorisez l\'accès à la galerie.');
+          Alert.alert('Permission Required', 'Please allow gallery access.');
           return;
         }
         const result = await ImagePicker.launchImageLibraryAsync({
@@ -313,7 +240,7 @@ export default function ChatScreen({ navigation, route }: any) {
       if (type === 'camera') {
         const permission = await ImagePicker.requestCameraPermissionsAsync();
         if (!permission.granted) {
-          Alert.alert('Permission requise', 'Autorisez l\'accès à la caméra.');
+          Alert.alert('Permission Required', 'Please allow camera access.');
           return;
         }
         const result = await ImagePicker.launchCameraAsync({
@@ -351,7 +278,7 @@ export default function ChatScreen({ navigation, route }: any) {
       }]);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error';
-      Alert.alert('Erreur', `Impossible de sélectionner: ${message}`);
+      Alert.alert('Error', `Could not select file: ${message}`);
     }
   };
 
@@ -416,62 +343,28 @@ export default function ChatScreen({ navigation, route }: any) {
       />
 
       <StreamingIndicator 
-        visible={chat.isGenerating && 
-          chat.messages.length > 0 && 
-          !chat.messages[chat.messages.length - 1].content} 
+        visible={chat.isGenerating} 
+        activity={ws.activity}
       />
 
       <ActionButtons actions={actions} onAction={handleAction} />
 
-      {/* Voice recording overlay */}
-      {voiceState !== 'idle' && (
-        <View style={styles.voiceOverlay}>
-          {voiceState === 'recording' && (
-            <>
-              <View style={styles.waveBarsContainer}>
-                {waveAnims.map((anim, i) => (
-                  <Animated.View
-                    key={i}
-                    style={[
-                      styles.waveBar,
-                      { transform: [{ scaleY: anim }] },
-                    ]}
-                  />
-                ))}
-              </View>
-              <Text style={styles.voiceStatusText}>Écoute en cours...</Text>
-            </>
-          )}
-          {voiceState === 'transcribing' && (
-            <>
-              <Text style={styles.transcribingEmoji}>⏳</Text>
-              <Text style={styles.voiceStatusText}>Transcription...</Text>
-            </>
-          )}
-        </View>
-      )}
+      {/* Inline voice recording indicator (no overlay — keeps input accessible) */}
 
       <View style={styles.footerContainer}>
         {showAttachmentMenu && (
           <View style={styles.attachmentsMenu}>
             <TouchableOpacity style={styles.attachmentItem} onPress={() => handleAttachmentPress('camera')}>
               <Text style={styles.attachmentIcon}>📷</Text>
-              <Text style={styles.attachmentLabel}>Caméra</Text>
+              <Text style={styles.attachmentLabel}>Camera</Text>
             </TouchableOpacity>
             <TouchableOpacity style={styles.attachmentItem} onPress={() => handleAttachmentPress('image')}>
               <Text style={styles.attachmentIcon}>🖼️</Text>
-              <Text style={styles.attachmentLabel}>Photo</Text>
+              <Text style={styles.attachmentLabel}>Gallery</Text>
             </TouchableOpacity>
-            <TouchableOpacity style={styles.attachmentItem} onPress={() => handleAttachmentPress('file')}>
+            <TouchableOpacity style={[styles.attachmentItem, styles.attachmentItemLast]} onPress={() => handleAttachmentPress('file')}>
               <Text style={styles.attachmentIcon}>📎</Text>
-              <Text style={styles.attachmentLabel}>Fichier</Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={[styles.attachmentItem, styles.attachmentItemLast]}
-              onPress={() => handleAttachmentPress('audio')}
-            >
-              <Text style={styles.attachmentIcon}>🎙️</Text>
-              <Text style={styles.attachmentLabel}>Audio</Text>
+              <Text style={styles.attachmentLabel}>File</Text>
             </TouchableOpacity>
           </View>
         )}
@@ -519,11 +412,27 @@ export default function ChatScreen({ navigation, route }: any) {
               style={styles.input}
               value={input}
               onChangeText={setInput}
-              placeholder={voiceState === 'transcribing' ? 'Transcription...' : 'Poser une question'}
-              placeholderTextColor="#888"
+              placeholder={
+                voiceState === 'recording' ? 'Listening…' :
+                voiceState === 'transcribing' ? 'Transcribing…' :
+                'Ask a question'
+              }
+              placeholderTextColor={voiceState === 'recording' ? '#FF3B30' : '#888'}
               multiline
               editable={voiceState === 'idle'}
             />
+            {/* Mic button — always visible, toggles recording */}
+            {!chat.isGenerating && (
+              <TouchableOpacity
+                style={[styles.micButton, voiceState === 'recording' && styles.micButtonRecording]}
+                onPress={handleMicToggle}
+                disabled={voiceState === 'transcribing'}
+                activeOpacity={0.7}
+              >
+                <Text style={styles.micIcon}>{voiceState === 'recording' ? '⏹' : '🎙'}</Text>
+              </TouchableOpacity>
+            )}
+            {/* Send / Cancel / Settings button */}
             {chat.isGenerating ? (
               <TouchableOpacity style={styles.cancelButtonIcon} onPress={handleCancel}>
                 <Text style={styles.buttonText}>⏹</Text>
@@ -532,16 +441,9 @@ export default function ChatScreen({ navigation, route }: any) {
               <TouchableOpacity style={styles.sendButtonIcon} onPress={handleSend}>
                 <Text style={styles.buttonText}>➤</Text>
               </TouchableOpacity>
-            ) : voiceState === 'recording' ? (
-              <TouchableOpacity 
-                style={[styles.micButton, styles.micButtonRecording]} 
-                onPress={handleVoicePressOut}
-              >
-                <Text style={styles.micIcon}>⏹</Text>
-              </TouchableOpacity>
             ) : (
-              <TouchableOpacity 
-                style={styles.page2Button} 
+              <TouchableOpacity
+                style={styles.page2Button}
                 onPress={() => navigation.navigate('Settings', { onClear: () => chat.clearHistory() })}
               >
                 <Text style={styles.page2Icon}>⚡</Text>
@@ -609,6 +511,7 @@ const createStyles = (colors: ThemeColors) => StyleSheet.create({
     borderTopWidth: 1,
     borderTopColor: colors.border,
     position: 'relative',
+    zIndex: 10,
   },
   attachmentsMenu: {
     position: 'absolute',
@@ -619,7 +522,9 @@ const createStyles = (colors: ThemeColors) => StyleSheet.create({
     backgroundColor: colors.surface,
     borderWidth: 1,
     borderColor: colors.border,
-    overflow: 'hidden',
+    overflow: 'visible',
+    zIndex: 999,
+    elevation: 10,
   },
   attachmentItem: {
     flexDirection: 'row',
@@ -800,36 +705,5 @@ const createStyles = (colors: ThemeColors) => StyleSheet.create({
   page2Icon: {
     fontSize: 18,
     color: colors.accent,
-  },
-  voiceOverlay: {
-    backgroundColor: colors.surface,
-    paddingVertical: 16,
-    paddingHorizontal: 24,
-    alignItems: 'center',
-    borderTopWidth: 1,
-    borderTopColor: colors.border,
-  },
-  waveBarsContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    height: 40,
-    gap: 4,
-    marginBottom: 8,
-  },
-  waveBar: {
-    width: 4,
-    height: 32,
-    borderRadius: 2,
-    backgroundColor: '#FF3B30',
-  },
-  voiceStatusText: {
-    color: colors.textSecondary,
-    fontSize: 13,
-    fontWeight: '600',
-  },
-  transcribingEmoji: {
-    fontSize: 28,
-    marginBottom: 6,
   },
 });

@@ -14,26 +14,32 @@
   ],
   "main": "./dist/extension.js",
   "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "pocketpilot",
+          "title": "PocketPilot",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "pocketpilot": [
+        {
+          "type": "webview",
+          "id": "pocketpilot.dashboard",
+          "name": "Dashboard"
+        }
+      ]
+    },
     "commands": [
-      {
-        "command": "pocketpilot.startServer",
-        "title": "PocketPilot: Start Server"
-      },
-      {
-        "command": "pocketpilot.stopServer",
-        "title": "PocketPilot: Stop Server"
-      },
       {
         "command": "pocketpilot.showQRCode",
         "title": "PocketPilot: Show QR Code"
       },
       {
-        "command": "pocketpilot.enableTunnel",
-        "title": "PocketPilot: Enable Remote Tunnel"
-      },
-      {
-        "command": "pocketpilot.disableTunnel",
-        "title": "PocketPilot: Disable Remote Tunnel"
+        "command": "pocketpilot.toggleTunnel",
+        "title": "PocketPilot: Toggle Remote Tunnel"
       },
       {
         "command": "pocketpilot.copyAuthToken",

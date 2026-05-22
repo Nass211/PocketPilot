@@ -5257,49 +5257,107 @@ function abortHandshakeOrEmitwsClientError(
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
-/* harmony export */   StatusBarManager: () => (/* binding */ StatusBarManager)
+/* harmony export */   StatusManager: () => (/* binding */ StatusManager)
 /* harmony export */ });
 /* harmony import */ var vscode__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(1);
 /* harmony import */ var vscode__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(vscode__WEBPACK_IMPORTED_MODULE_0__);
+/* harmony import */ var events__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(7);
+/* harmony import */ var events__WEBPACK_IMPORTED_MODULE_1___default = /*#__PURE__*/__webpack_require__.n(events__WEBPACK_IMPORTED_MODULE_1__);
 
-class StatusBarManager {
-    item;
+
+/**
+ * Single source of truth for all PocketPilot state.
+ *
+ * Both the status bar item AND the sidebar webview subscribe to changes.
+ * This eliminates stale-status bugs because every transition goes through
+ * one place — `update()` — which notifies all subscribers automatically.
+ */
+class StatusManager extends events__WEBPACK_IMPORTED_MODULE_1__.EventEmitter {
+    state = {
+        server: 'stopped',
+        phone: 'disconnected',
+        tunnel: 'off',
+        tunnelUrl: null,
+        tunnelProvider: '',
+        session: 'idle',
+        activity: '',
+        model: 'auto',
+        mode: 'ask',
+    };
+    statusBarItem;
     constructor() {
-        this.item = vscode__WEBPACK_IMPORTED_MODULE_0__.window.createStatusBarItem(vscode__WEBPACK_IMPORTED_MODULE_0__.StatusBarAlignment.Left, 100);
-        this.item.command = 'pocketpilot.showQRCode';
-        this.setWaiting();
+        super();
+        this.statusBarItem = vscode__WEBPACK_IMPORTED_MODULE_0__.window.createStatusBarItem(vscode__WEBPACK_IMPORTED_MODULE_0__.StatusBarAlignment.Left, 100);
+        this.statusBarItem.command = 'pocketpilot.showQRCode';
+        this.syncStatusBar();
+        this.statusBarItem.show();
     }
-    show() {
-        this.item.show();
+    /** Get a snapshot of current state */
+    getState() {
+        return { ...this.state };
+    }
+    /** Update one or more state fields. Notifies all subscribers. */
+    update(patch) {
+        let changed = false;
+        for (const [key, value] of Object.entries(patch)) {
+            if (this.state[key] !== value) {
+                this.state[key] = value;
+                changed = true;
+            }
+        }
+        if (changed) {
+            this.syncStatusBar();
+            this.emit('stateChanged', this.getState());
+        }
     }
     dispose() {
-        this.item.dispose();
+        this.statusBarItem.dispose();
     }
-    setWaiting() {
-        this.item.text = '$(broadcast) PocketPilot — waiting';
-        this.item.backgroundColor = undefined;
-        this.item.tooltip = 'Click to show QR code';
-    }
-    setConnected(device) {
-        const label = device ?? 'phone';
-        this.item.text = `$(broadcast) PocketPilot — ${label} connected`;
-        this.item.backgroundColor = undefined;
-        this.item.tooltip = 'Phone is connected';
-    }
-    setTunnelReady() {
-        this.item.text = '$(broadcast) PocketPilot — tunnel ready';
-        this.item.backgroundColor = undefined;
-        this.item.tooltip = 'Tunnel active — scan QR to connect phone';
-    }
-    setBusy(task) {
-        this.item.text = `$(sync~spin) PocketPilot — ${task}`;
-        this.item.backgroundColor = undefined;
-        this.item.tooltip = task;
-    }
-    setError(msg) {
-        this.item.text = `$(error) PocketPilot — ${msg}`;
-        this.item.backgroundColor = new vscode__WEBPACK_IMPORTED_MODULE_0__.ThemeColor('statusBarItem.errorBackground');
-        this.item.tooltip = msg;
+    // ── Status bar rendering ─────────────────────────────────────────
+    syncStatusBar() {
+        const s = this.state;
+        if (s.session === 'busy') {
+            const label = s.activity || 'generating…';
+            this.statusBarItem.text = `$(sync~spin) PocketPilot — ${label}`;
+            this.statusBarItem.backgroundColor = undefined;
+            this.statusBarItem.tooltip = label;
+            return;
+        }
+        if (s.phone === 'connected') {
+            this.statusBarItem.text = '$(broadcast) PocketPilot — phone connected';
+            this.statusBarItem.backgroundColor = undefined;
+            this.statusBarItem.tooltip = 'Phone is connected';
+            return;
+        }
+        if (s.tunnel === 'active') {
+            const via = s.tunnelProvider ? ` (${s.tunnelProvider})` : '';
+            this.statusBarItem.text = `$(broadcast) PocketPilot — tunnel ready${via}`;
+            this.statusBarItem.backgroundColor = undefined;
+            this.statusBarItem.tooltip = `Tunnel active — scan QR to connect phone${via}`;
+            return;
+        }
+        if (s.tunnel === 'starting') {
+            this.statusBarItem.text = '$(sync~spin) PocketPilot — starting tunnel…';
+            this.statusBarItem.backgroundColor = undefined;
+            this.statusBarItem.tooltip = 'Starting tunnel…';
+            return;
+        }
+        if (s.tunnel === 'error') {
+            this.statusBarItem.text = '$(error) PocketPilot — tunnel failed';
+            this.statusBarItem.backgroundColor = new vscode__WEBPACK_IMPORTED_MODULE_0__.ThemeColor('statusBarItem.errorBackground');
+            this.statusBarItem.tooltip = 'Tunnel failed — click to retry';
+            return;
+        }
+        if (s.server === 'running') {
+            this.statusBarItem.text = '$(broadcast) PocketPilot — waiting';
+            this.statusBarItem.backgroundColor = undefined;
+            this.statusBarItem.tooltip = 'Click to show QR code';
+            return;
+        }
+        // server stopped / error
+        this.statusBarItem.text = '$(error) PocketPilot — port busy';
+        this.statusBarItem.backgroundColor = new vscode__WEBPACK_IMPORTED_MODULE_0__.ThemeColor('statusBarItem.errorBackground');
+        this.statusBarItem.tooltip = 'Server could not start';
     }
 }
 
@@ -11902,6 +11960,521 @@ exports.renderToDataURL = function renderToDataURL (qrData, canvas, options) {
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   SidebarProvider: () => (/* binding */ SidebarProvider)
+/* harmony export */ });
+/* harmony import */ var vscode__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(1);
+/* harmony import */ var vscode__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(vscode__WEBPACK_IMPORTED_MODULE_0__);
+/* harmony import */ var os__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(33);
+/* harmony import */ var os__WEBPACK_IMPORTED_MODULE_1___default = /*#__PURE__*/__webpack_require__.n(os__WEBPACK_IMPORTED_MODULE_1__);
+/* harmony import */ var qrcode__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(34);
+
+
+
+const WS_PORT = 3000;
+/**
+ * WebviewViewProvider for the PocketPilot sidebar dashboard.
+ *
+ * Renders a rich HTML dashboard with:
+ *  - Live status indicators (server, phone, tunnel)
+ *  - Quick-action buttons
+ *  - Connection info (URLs, token)
+ *  - QR code for phone scanning
+ *  - Current session info (model, mode, activity)
+ *
+ * Subscribes to StatusManager for live updates.
+ */
+class SidebarProvider {
+    extensionUri;
+    static viewType = 'pocketpilot.dashboard';
+    view;
+    statusManager;
+    authToken;
+    tunnelUrl = null;
+    constructor(extensionUri, statusManager, authToken) {
+        this.extensionUri = extensionUri;
+        this.statusManager = statusManager;
+        this.authToken = authToken;
+        // Subscribe to state changes and push them to the webview
+        statusManager.on('stateChanged', (state) => {
+            this.tunnelUrl = state.tunnelUrl;
+            this.postMessage({ type: 'state', ...state });
+            // Regenerate QR code when tunnel changes
+            if (state.tunnel === 'active' || state.tunnel === 'off') {
+                this.sendQRCode();
+            }
+        });
+    }
+    resolveWebviewView(webviewView, _context, _token) {
+        this.view = webviewView;
+        webviewView.webview.options = {
+            enableScripts: true,
+            localResourceRoots: [this.extensionUri],
+        };
+        webviewView.webview.html = this.getHtml();
+        // Handle messages from the webview (button clicks)
+        webviewView.webview.onDidReceiveMessage((msg) => {
+            switch (msg.command) {
+                case 'showQR':
+                    vscode__WEBPACK_IMPORTED_MODULE_0__.commands.executeCommand('pocketpilot.showQRCode');
+                    break;
+                case 'toggleTunnel':
+                    vscode__WEBPACK_IMPORTED_MODULE_0__.commands.executeCommand('pocketpilot.toggleTunnel');
+                    break;
+                case 'clearHistory':
+                    vscode__WEBPACK_IMPORTED_MODULE_0__.commands.executeCommand('pocketpilot.clearHistory');
+                    break;
+                case 'copyToken':
+                    vscode__WEBPACK_IMPORTED_MODULE_0__.commands.executeCommand('pocketpilot.copyAuthToken');
+                    break;
+                case 'copyUrl':
+                    if (msg.url) {
+                        vscode__WEBPACK_IMPORTED_MODULE_0__.env.clipboard.writeText(msg.url);
+                        vscode__WEBPACK_IMPORTED_MODULE_0__.window.showInformationMessage('URL copied to clipboard');
+                    }
+                    break;
+            }
+        });
+        // Send initial state + QR code
+        webviewView.onDidChangeVisibility(() => {
+            if (webviewView.visible) {
+                this.postMessage({ type: 'state', ...this.statusManager.getState() });
+                this.sendQRCode();
+            }
+        });
+        // Initial push
+        setTimeout(() => {
+            this.postMessage({ type: 'state', ...this.statusManager.getState() });
+            this.sendQRCode();
+        }, 100);
+    }
+    postMessage(msg) {
+        this.view?.webview.postMessage(msg);
+    }
+    async sendQRCode() {
+        try {
+            const localIp = getLocalIP();
+            const localUrl = `ws://${localIp}:${WS_PORT}`;
+            const remoteUrl = this.tunnelUrl
+                ? this.tunnelUrl.replace('https://', 'wss://')
+                : null;
+            const payload = JSON.stringify({
+                url: remoteUrl ?? localUrl,
+                localUrl,
+                token: this.authToken,
+            });
+            const qrDataUrl = await qrcode__WEBPACK_IMPORTED_MODULE_2__.toDataURL(payload, { width: 220, margin: 2 });
+            this.postMessage({ type: 'qrcode', dataUrl: qrDataUrl, localUrl, remoteUrl });
+        }
+        catch {
+            // QR generation failed — not critical
+        }
+    }
+    getHtml() {
+        return /* html */ `<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PocketPilot</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: var(--vscode-font-family);
+            font-size: var(--vscode-font-size);
+            color: var(--vscode-foreground);
+            background: var(--vscode-sideBar-background);
+            padding: 12px;
+            line-height: 1.5;
+        }
+
+        /* ── Status Section ── */
+        .status-section {
+            margin-bottom: 16px;
+        }
+        .status-section h3 {
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            color: var(--vscode-descriptionForeground);
+            margin-bottom: 8px;
+            font-weight: 600;
+        }
+
+        .status-row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 5px 0;
+        }
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            flex-shrink: 0;
+        }
+        .dot-green { background: #34C759; box-shadow: 0 0 4px rgba(52,199,89,0.4); }
+        .dot-yellow { background: #FFCC02; box-shadow: 0 0 4px rgba(255,204,2,0.4); }
+        .dot-red { background: #FF3B30; box-shadow: 0 0 4px rgba(255,59,48,0.3); }
+        .dot-gray { background: #636366; }
+        .dot-pulse {
+            animation: pulse 1.5s ease-in-out infinite;
+        }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.4; }
+        }
+
+        .status-label {
+            font-size: 12px;
+            flex: 1;
+        }
+        .status-value {
+            font-size: 11px;
+            color: var(--vscode-descriptionForeground);
+        }
+
+        /* ── Buttons ── */
+        .actions {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            margin-bottom: 16px;
+        }
+        .action-btn {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 12px;
+            border: 1px solid var(--vscode-button-secondaryBorder, var(--vscode-widget-border));
+            border-radius: 4px;
+            background: var(--vscode-button-secondaryBackground);
+            color: var(--vscode-button-secondaryForeground);
+            font-family: inherit;
+            font-size: 12px;
+            cursor: pointer;
+            transition: background 0.15s;
+        }
+        .action-btn:hover {
+            background: var(--vscode-button-secondaryHoverBackground);
+        }
+        .action-btn.primary {
+            background: var(--vscode-button-background);
+            color: var(--vscode-button-foreground);
+            border-color: var(--vscode-button-background);
+        }
+        .action-btn.primary:hover {
+            background: var(--vscode-button-hoverBackground);
+        }
+        .action-btn .icon { font-size: 14px; }
+
+        /* ── QR Code ── */
+        .qr-section {
+            text-align: center;
+            margin-bottom: 16px;
+        }
+        .qr-section img {
+            border-radius: 8px;
+            max-width: 100%;
+            margin: 8px 0;
+        }
+        .qr-label {
+            font-size: 11px;
+            color: var(--vscode-descriptionForeground);
+        }
+
+        /* ── Info ── */
+        .info-section {
+            margin-bottom: 16px;
+        }
+        .info-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 4px 0;
+            gap: 8px;
+        }
+        .info-key {
+            font-size: 11px;
+            color: var(--vscode-descriptionForeground);
+            white-space: nowrap;
+        }
+        .info-value {
+            font-size: 11px;
+            font-family: var(--vscode-editor-font-family);
+            color: var(--vscode-foreground);
+            word-break: break-all;
+            text-align: right;
+        }
+        .copy-btn {
+            background: none;
+            border: none;
+            color: var(--vscode-textLink-foreground);
+            cursor: pointer;
+            font-size: 11px;
+            padding: 0 2px;
+        }
+        .copy-btn:hover { text-decoration: underline; }
+
+        /* ── Divider ── */
+        .divider {
+            height: 1px;
+            background: var(--vscode-widget-border);
+            margin: 12px 0;
+        }
+
+        /* ── Session ── */
+        .session-info {
+            font-size: 12px;
+        }
+        .session-row {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 3px 0;
+        }
+        .session-badge {
+            display: inline-block;
+            padding: 1px 6px;
+            border-radius: 3px;
+            font-size: 10px;
+            font-weight: 600;
+            text-transform: uppercase;
+            background: var(--vscode-badge-background);
+            color: var(--vscode-badge-foreground);
+        }
+        .activity-text {
+            font-size: 11px;
+            color: var(--vscode-descriptionForeground);
+            font-style: italic;
+        }
+    </style>
+</head>
+<body>
+    <!-- Status -->
+    <div class="status-section">
+        <h3>Status</h3>
+        <div class="status-row">
+            <span id="dot-server" class="status-dot dot-gray"></span>
+            <span class="status-label">Server</span>
+            <span id="val-server" class="status-value">stopped</span>
+        </div>
+        <div class="status-row">
+            <span id="dot-phone" class="status-dot dot-gray"></span>
+            <span class="status-label">Phone</span>
+            <span id="val-phone" class="status-value">disconnected</span>
+        </div>
+        <div class="status-row">
+            <span id="dot-tunnel" class="status-dot dot-gray"></span>
+            <span class="status-label">Tunnel</span>
+            <span id="val-tunnel" class="status-value">off</span>
+        </div>
+    </div>
+
+    <div class="divider"></div>
+
+    <!-- Quick Actions -->
+    <div class="status-section">
+        <h3>Quick Actions</h3>
+        <div class="actions">
+            <button class="action-btn primary" id="btn-qr">
+                <span class="icon">📱</span> Show QR Code
+            </button>
+            <button class="action-btn" id="btn-tunnel">
+                <span class="icon">🌐</span>
+                <span id="btn-tunnel-label">Enable Tunnel</span>
+            </button>
+            <button class="action-btn" id="btn-clear">
+                <span class="icon">🗑️</span> Clear History
+            </button>
+            <button class="action-btn" id="btn-token">
+                <span class="icon">🔑</span> Copy Auth Token
+            </button>
+        </div>
+    </div>
+
+    <div class="divider"></div>
+
+    <!-- QR Code -->
+    <div class="qr-section" id="qr-section">
+        <h3 style="text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:0.5px;color:var(--vscode-descriptionForeground);margin-bottom:8px;font-weight:600;">
+            Connect Phone
+        </h3>
+        <img id="qr-img" src="" alt="QR Code" style="display:none;" />
+        <div class="qr-label">Scan with PocketPilot app</div>
+    </div>
+
+    <div class="divider"></div>
+
+    <!-- Connection Info -->
+    <div class="info-section">
+        <h3 style="font-size:11px;text-transform:uppercase;letter-spacing:0.5px;color:var(--vscode-descriptionForeground);margin-bottom:8px;font-weight:600;">
+            Connection
+        </h3>
+        <div class="info-row">
+            <span class="info-key">Local</span>
+            <span class="info-value" id="val-local">—</span>
+            <button class="copy-btn" id="copy-local">copy</button>
+        </div>
+        <div class="info-row" id="row-tunnel-url" style="display:none;">
+            <span class="info-key">Tunnel</span>
+            <span class="info-value" id="val-tunnel-url">—</span>
+            <button class="copy-btn" id="copy-tunnel">copy</button>
+        </div>
+    </div>
+
+    <div class="divider"></div>
+
+    <!-- Session Info -->
+    <div class="status-section">
+        <h3>Session</h3>
+        <div class="session-info">
+            <div class="session-row">
+                <span class="info-key">Model</span>
+                <span class="session-badge" id="val-model">auto</span>
+            </div>
+            <div class="session-row">
+                <span class="info-key">Mode</span>
+                <span class="session-badge" id="val-mode">ask</span>
+            </div>
+            <div class="session-row" id="row-activity" style="display:none;">
+                <span class="activity-text" id="val-activity"></span>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const vscode = acquireVsCodeApi();
+
+        // ── Elements ────────────────────────────────────────────
+        const dotServer = document.getElementById('dot-server');
+        const dotPhone = document.getElementById('dot-phone');
+        const dotTunnel = document.getElementById('dot-tunnel');
+        const valServer = document.getElementById('val-server');
+        const valPhone = document.getElementById('val-phone');
+        const valTunnel = document.getElementById('val-tunnel');
+        const btnTunnelLabel = document.getElementById('btn-tunnel-label');
+        const qrImg = document.getElementById('qr-img');
+        const valLocal = document.getElementById('val-local');
+        const valTunnelUrl = document.getElementById('val-tunnel-url');
+        const rowTunnelUrl = document.getElementById('row-tunnel-url');
+        const valModel = document.getElementById('val-model');
+        const valMode = document.getElementById('val-mode');
+        const rowActivity = document.getElementById('row-activity');
+        const valActivity = document.getElementById('val-activity');
+
+        // ── Button handlers ─────────────────────────────────────
+        document.getElementById('btn-qr').addEventListener('click', () => {
+            vscode.postMessage({ command: 'showQR' });
+        });
+        document.getElementById('btn-tunnel').addEventListener('click', () => {
+            vscode.postMessage({ command: 'toggleTunnel' });
+        });
+        document.getElementById('btn-clear').addEventListener('click', () => {
+            vscode.postMessage({ command: 'clearHistory' });
+        });
+        document.getElementById('btn-token').addEventListener('click', () => {
+            vscode.postMessage({ command: 'copyToken' });
+        });
+        document.getElementById('copy-local').addEventListener('click', () => {
+            vscode.postMessage({ command: 'copyUrl', url: valLocal.textContent });
+        });
+        document.getElementById('copy-tunnel').addEventListener('click', () => {
+            vscode.postMessage({ command: 'copyUrl', url: valTunnelUrl.textContent });
+        });
+
+        // ── State updates ───────────────────────────────────────
+        window.addEventListener('message', (event) => {
+            const msg = event.data;
+
+            if (msg.type === 'state') {
+                // Server
+                dotServer.className = 'status-dot ' + (msg.server === 'running' ? 'dot-green' : 'dot-red');
+                valServer.textContent = msg.server;
+
+                // Phone
+                dotPhone.className = 'status-dot ' + (msg.phone === 'connected' ? 'dot-green' : 'dot-gray');
+                valPhone.textContent = msg.phone;
+
+                // Tunnel
+                const tunnelDotMap = {
+                    'off': 'dot-gray',
+                    'starting': 'dot-yellow dot-pulse',
+                    'active': 'dot-green',
+                    'error': 'dot-red',
+                };
+                dotTunnel.className = 'status-dot ' + (tunnelDotMap[msg.tunnel] || 'dot-gray');
+                let tunnelLabel = msg.tunnel;
+                if (msg.tunnel === 'active' && msg.tunnelProvider) {
+                    tunnelLabel = msg.tunnelProvider;
+                }
+                valTunnel.textContent = tunnelLabel;
+
+                // Tunnel button label
+                if (msg.tunnel === 'active' || msg.tunnel === 'starting') {
+                    btnTunnelLabel.textContent = 'Disable Tunnel';
+                } else {
+                    btnTunnelLabel.textContent = 'Enable Tunnel';
+                }
+
+                // Tunnel URL row
+                if (msg.tunnelUrl) {
+                    rowTunnelUrl.style.display = 'flex';
+                    valTunnelUrl.textContent = msg.tunnelUrl;
+                } else {
+                    rowTunnelUrl.style.display = 'none';
+                }
+
+                // Session
+                valModel.textContent = msg.model || 'auto';
+                valMode.textContent = msg.mode || 'ask';
+
+                if (msg.activity && msg.session === 'busy') {
+                    rowActivity.style.display = 'flex';
+                    valActivity.textContent = msg.activity;
+                } else {
+                    rowActivity.style.display = 'none';
+                }
+            }
+
+            if (msg.type === 'qrcode') {
+                qrImg.src = msg.dataUrl;
+                qrImg.style.display = 'block';
+                valLocal.textContent = msg.localUrl;
+                if (msg.remoteUrl) {
+                    rowTunnelUrl.style.display = 'flex';
+                    valTunnelUrl.textContent = msg.remoteUrl;
+                }
+            }
+        });
+    </script>
+</body>
+</html>`;
+    }
+}
+function getLocalIP() {
+    const interfaces = os__WEBPACK_IMPORTED_MODULE_1__.networkInterfaces();
+    for (const iface of Object.values(interfaces)) {
+        if (!iface) {
+            continue;
+        }
+        for (const info of iface) {
+            if (info.family === 'IPv4' && !info.internal) {
+                return info.address;
+            }
+        }
+    }
+    return '127.0.0.1';
+}
+
+
+/***/ }),
+/* 95 */
+/***/ ((__unused_webpack_module, __webpack_exports__, __webpack_require__) => {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   SessionManager: () => (/* binding */ SessionManager)
 /* harmony export */ });
 /* harmony import */ var vscode__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(1);
@@ -11914,7 +12487,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var path__WEBPACK_IMPORTED_MODULE_3___default = /*#__PURE__*/__webpack_require__.n(path__WEBPACK_IMPORTED_MODULE_3__);
 /* harmony import */ var events__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(7);
 /* harmony import */ var events__WEBPACK_IMPORTED_MODULE_4___default = /*#__PURE__*/__webpack_require__.n(events__WEBPACK_IMPORTED_MODULE_4__);
-/* harmony import */ var _github_copilot_sdk__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(95);
+/* harmony import */ var _github_copilot_sdk__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(96);
 /* harmony import */ var _github_copilot_sdk__WEBPACK_IMPORTED_MODULE_5___default = /*#__PURE__*/__webpack_require__.n(_github_copilot_sdk__WEBPACK_IMPORTED_MODULE_5__);
 
 
@@ -11991,6 +12564,8 @@ class SessionManager extends events__WEBPACK_IMPORTED_MODULE_4__.EventEmitter {
     allowAllSession = false;
     // Event unsubscribe functions for the current session
     eventUnsubs = [];
+    // Workspace file state snapshot — taken before each prompt to detect changes
+    fileHashesBaseline = new Map();
     static MODE_INSTRUCTIONS = {
         ask: [
             'You are a helpful coding assistant.',
@@ -12223,6 +12798,7 @@ class SessionManager extends events__WEBPACK_IMPORTED_MODULE_4__.EventEmitter {
             if (this.isBusy) {
                 this.isBusy = false;
                 this.emit('activity', ''); // Clear activity status
+                this.emitModifiedFiles(); // Send file diffs to phone
                 this.emit('done');
                 // In plan mode, offer action buttons
                 if (this._currentMode === 'plan') {
@@ -12258,12 +12834,20 @@ class SessionManager extends events__WEBPACK_IMPORTED_MODULE_4__.EventEmitter {
         // Tool execution start → emit inline progress AND activity status
         this.eventUnsubs.push(session.on('tool.execution_start', (event) => {
             const toolName = event.data.toolName || 'tool';
-            // Format a human-readable activity label
+            const args = event.data.arguments || {};
+            // Format a human-readable activity label with detail
             const label = this.formatToolLabel(toolName);
-            this.emit('activity', label);
+            const detail = this.formatToolDetail(toolName, args);
+            const fullLabel = detail ? `${label}: ${detail}` : label;
+            this.emit('activity', fullLabel);
             this.emit('notification', 'Tool Running', `Running: ${toolName}`);
             // Emit inline thinking chunk so the user sees what's happening in the chat
-            this.emit('chunk', `\n\n> 🔧 **${label}**\n\n`);
+            if (detail) {
+                this.emit('chunk', `\n\n> 🔧 **${label}:** \`${detail}\`\n\n`);
+            }
+            else {
+                this.emit('chunk', `\n\n> 🔧 **${label}**\n\n`);
+            }
         }));
         // Tool execution complete → update inline progress
         this.eventUnsubs.push(session.on('tool.execution_complete', (event) => {
@@ -12297,6 +12881,148 @@ class SessionManager extends events__WEBPACK_IMPORTED_MODULE_4__.EventEmitter {
         };
         return labels[toolName] || toolName.replace(/_/g, ' ');
     }
+    /** Extract the most relevant detail string from a tool's arguments */
+    formatToolDetail(toolName, args) {
+        // Try to get the most useful argument for each tool type
+        switch (toolName) {
+            case 'bash':
+            case 'run_command':
+            case 'execute_command': {
+                const cmd = args.command || args.cmd || args.input || '';
+                // Truncate long commands
+                return typeof cmd === 'string' ? (cmd.length > 80 ? cmd.slice(0, 77) + '...' : cmd) : '';
+            }
+            case 'read_file':
+            case 'edit_file':
+            case 'write_file':
+            case 'create_file':
+            case 'delete_file':
+            case 'view': {
+                const path = args.path || args.file || args.filePath || args.filename || '';
+                // Show just the filename for brevity
+                if (typeof path === 'string' && path.includes('/')) {
+                    return path.split('/').pop() || path;
+                }
+                return path;
+            }
+            case 'grep_search':
+            case 'search_files':
+            case 'file_search': {
+                const query = args.query || args.pattern || args.search || '';
+                return typeof query === 'string' ? query : '';
+            }
+            case 'list_directory': {
+                const dir = args.path || args.directory || args.dir || '';
+                return typeof dir === 'string' ? dir : '';
+            }
+            default:
+                return '';
+        }
+    }
+    // ── Workspace diff tracking ─────────────────────────────────────
+    /**
+     * Snapshot the current workspace state before each prompt.
+     * We record which files are already dirty (modified/staged) so that after
+     * the agent finishes, we only report files that WEREN'T dirty before.
+     */
+    snapshotWorkspaceState() {
+        const wsFolder = vscode__WEBPACK_IMPORTED_MODULE_0__.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        if (!wsFolder) {
+            this.fileHashesBaseline.clear();
+            return;
+        }
+        try {
+            // Get all files that currently differ from HEAD (staged + unstaged)
+            const output = (0,child_process__WEBPACK_IMPORTED_MODULE_1__.execSync)('git diff HEAD --name-only 2>/dev/null || true', { cwd: wsFolder, encoding: 'utf-8', timeout: 5000 }).trim();
+            this.fileHashesBaseline.clear();
+            for (const file of output.split('\n').filter(Boolean)) {
+                this.fileHashesBaseline.set(file, 'pre-existing');
+            }
+            // Also include untracked files in baseline
+            const untracked = (0,child_process__WEBPACK_IMPORTED_MODULE_1__.execSync)('git ls-files --others --exclude-standard 2>/dev/null || true', { cwd: wsFolder, encoding: 'utf-8', timeout: 5000 }).trim();
+            for (const file of untracked.split('\n').filter(Boolean)) {
+                this.fileHashesBaseline.set(file, 'untracked');
+            }
+        }
+        catch {
+            this.fileHashesBaseline.clear();
+        }
+    }
+    /** Compare current workspace state against baseline and emit modified files with diffs */
+    emitModifiedFiles() {
+        const wsFolder = vscode__WEBPACK_IMPORTED_MODULE_0__.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        if (!wsFolder)
+            return;
+        try {
+            // Get ALL files that now differ from HEAD (staged + unstaged)
+            const nowDirty = (0,child_process__WEBPACK_IMPORTED_MODULE_1__.execSync)('git diff HEAD --name-only 2>/dev/null || true', { cwd: wsFolder, encoding: 'utf-8', timeout: 5000 }).trim();
+            // Also check for newly untracked files
+            const nowUntracked = (0,child_process__WEBPACK_IMPORTED_MODULE_1__.execSync)('git ls-files --others --exclude-standard 2>/dev/null || true', { cwd: wsFolder, encoding: 'utf-8', timeout: 5000 }).trim();
+            // Combine and filter to only files that are NEW since snapshot
+            const allCurrentFiles = new Set();
+            for (const f of nowDirty.split('\n').filter(Boolean)) {
+                allCurrentFiles.add(f);
+            }
+            for (const f of nowUntracked.split('\n').filter(Boolean)) {
+                allCurrentFiles.add(f);
+            }
+            // Only keep files that were NOT already dirty before the prompt
+            const newlyChanged = [];
+            for (const file of allCurrentFiles) {
+                if (!this.fileHashesBaseline.has(file)) {
+                    newlyChanged.push(file);
+                }
+            }
+            if (newlyChanged.length === 0)
+                return;
+            const modifiedFiles = [];
+            for (const file of newlyChanged) {
+                try {
+                    // Skip binary files and build artifacts
+                    if (/\.(jpg|jpeg|png|gif|ico|woff|ttf|eot|map)$/i.test(file))
+                        continue;
+                    if (file.includes('node_modules/') || file.includes('dist/') || file.includes('.pocketpilot/'))
+                        continue;
+                    // Use diff HEAD to capture both staged and unstaged changes
+                    const diffStr = (0,child_process__WEBPACK_IMPORTED_MODULE_1__.execSync)(`git diff HEAD -- "${file}" 2>/dev/null || true`, { cwd: wsFolder, encoding: 'utf-8', timeout: 5000, maxBuffer: 1024 * 256 }).trim();
+                    if (!diffStr) {
+                        // Might be a new untracked file — show as all additions
+                        try {
+                            const content = (__webpack_require__(31).readFileSync)((__webpack_require__(30).join)(wsFolder, file), 'utf-8');
+                            const lines = content.split('\n');
+                            modifiedFiles.push({
+                                file,
+                                additions: lines.length,
+                                deletions: 0,
+                                diff: `--- /dev/null\n+++ b/${file}\n@@ -0,0 +1,${lines.length} @@\n` +
+                                    lines.map((l) => `+${l}`).join('\n'),
+                            });
+                        }
+                        catch { /* skip unreadable */ }
+                        continue;
+                    }
+                    // Count additions and deletions
+                    let additions = 0, deletions = 0;
+                    for (const line of diffStr.split('\n')) {
+                        if (line.startsWith('+') && !line.startsWith('+++'))
+                            additions++;
+                        if (line.startsWith('-') && !line.startsWith('---'))
+                            deletions++;
+                    }
+                    modifiedFiles.push({ file, additions, deletions, diff: diffStr });
+                }
+                catch {
+                    // Skip files we can't diff
+                }
+            }
+            if (modifiedFiles.length > 0) {
+                this.emit('files_modified', modifiedFiles);
+            }
+        }
+        catch {
+            // Best-effort — don't crash on diff failure
+        }
+    }
     async destroySession() {
         for (const unsub of this.eventUnsubs) {
             unsub();
@@ -12321,6 +13047,8 @@ class SessionManager extends events__WEBPACK_IMPORTED_MODULE_4__.EventEmitter {
         let perPromptModel = this.normalizeModelSelection(model);
         this.isBusy = true;
         this._hasHistory = true;
+        // Snapshot git state so we can detect which files the agent modified
+        this.snapshotWorkspaceState();
         const previousModel = this._currentModel;
         // Save image attachments to workspace temp dir so Copilot can read them
         const sdkAttachments = [];
@@ -12759,7 +13487,7 @@ class SessionManager extends events__WEBPACK_IMPORTED_MODULE_4__.EventEmitter {
 
 
 /***/ }),
-/* 95 */
+/* 96 */
 /***/ ((module) => {
 
 "use strict";
@@ -12848,10 +13576,12 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var crypto__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(2);
 /* harmony import */ var crypto__WEBPACK_IMPORTED_MODULE_1___default = /*#__PURE__*/__webpack_require__.n(crypto__WEBPACK_IMPORTED_MODULE_1__);
 /* harmony import */ var _WebSocketManager__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(3);
-/* harmony import */ var _StatusBarManager__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(27);
+/* harmony import */ var _StatusManager__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(27);
 /* harmony import */ var _TunnelManager__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(28);
 /* harmony import */ var _QRCodePanel__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(32);
-/* harmony import */ var _SessionManager__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(94);
+/* harmony import */ var _SidebarProvider__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(94);
+/* harmony import */ var _SessionManager__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(95);
+
 
 
 
@@ -12861,7 +13591,7 @@ __webpack_require__.r(__webpack_exports__);
 
 const WS_PORT = 3000;
 let wsManager = null;
-let statusBar = null;
+let statusManager = null;
 let tunnelManager = null;
 let qrPanel = null;
 let session = null;
@@ -12876,12 +13606,14 @@ async function activate(context) {
     }
     // ── Managers ────────────────────────────────────────────────────
     outputChannel = vscode__WEBPACK_IMPORTED_MODULE_0__.window.createOutputChannel('PocketPilot');
-    statusBar = new _StatusBarManager__WEBPACK_IMPORTED_MODULE_3__.StatusBarManager();
-    statusBar.show();
+    statusManager = new _StatusManager__WEBPACK_IMPORTED_MODULE_3__.StatusManager();
     tunnelManager = new _TunnelManager__WEBPACK_IMPORTED_MODULE_4__.TunnelManager(context.extensionPath);
     qrPanel = new _QRCodePanel__WEBPACK_IMPORTED_MODULE_5__.QRCodePanel();
     wsManager = new _WebSocketManager__WEBPACK_IMPORTED_MODULE_2__.WebSocketManager(authToken);
-    session = new _SessionManager__WEBPACK_IMPORTED_MODULE_6__.SessionManager(context);
+    session = new _SessionManager__WEBPACK_IMPORTED_MODULE_7__.SessionManager(context);
+    // ── Sidebar Dashboard ──────────────────────────────────────────
+    const sidebarProvider = new _SidebarProvider__WEBPACK_IMPORTED_MODULE_6__.SidebarProvider(context.extensionUri, statusManager, authToken);
+    context.subscriptions.push(vscode__WEBPACK_IMPORTED_MODULE_0__.window.registerWebviewViewProvider(_SidebarProvider__WEBPACK_IMPORTED_MODULE_6__.SidebarProvider.viewType, sidebarProvider));
     // Start the Copilot SDK client in the background
     session.startClient().catch((err) => {
         vscode__WEBPACK_IMPORTED_MODULE_0__.window.showWarningMessage(`PocketPilot: Could not start Copilot CLI — ${err.message ?? 'unknown error'}. Make sure GitHub Copilot CLI is installed.`);
@@ -12894,40 +13626,21 @@ async function activate(context) {
     session.on('done', () => {
         wsManager?.send({ type: 'done' });
         outputChannel?.appendLine('\n');
-        // Restore to the correct idle state
-        if (wsManager?.isConnected) {
-            statusBar?.setConnected();
-        }
-        else if (tunnelManager?.isRunning) {
-            statusBar?.setTunnelReady();
-        }
-        else {
-            statusBar?.setWaiting();
-        }
+        statusManager?.update({ session: 'idle', activity: '' });
     });
     session.on('error', (code, message) => {
         wsManager?.send({ type: 'error', code, message });
         outputChannel?.appendLine(`[Error] ${code}: ${message}`);
-        // Brief error flash, then restore correct idle state
-        statusBar?.setError('error');
-        setTimeout(() => {
-            if (wsManager?.isConnected) {
-                statusBar?.setConnected();
-            }
-            else if (tunnelManager?.isRunning) {
-                statusBar?.setTunnelReady();
-            }
-            else {
-                statusBar?.setWaiting();
-            }
-        }, 3000);
+        statusManager?.update({ session: 'idle', activity: '' });
     });
     session.on('model_switched', (model) => {
         wsManager?.send({ type: 'model_switched', model });
+        statusManager?.update({ model });
         outputChannel?.appendLine(`[Model] Switched to: ${model}`);
     });
     session.on('mode_switched', (mode) => {
         wsManager?.send({ type: 'mode_switched', mode });
+        statusManager?.update({ mode });
         outputChannel?.appendLine(`[Mode] Switched to: ${mode}`);
     });
     session.on('action_required', (actions) => {
@@ -12948,16 +13661,19 @@ async function activate(context) {
     });
     session.on('activity', (label) => {
         wsManager?.send({ type: 'activity', label });
+        statusManager?.update({ activity: label });
+    });
+    session.on('files_modified', (files) => {
+        wsManager?.send({ type: 'files_modified', files });
     });
     session.on('models_available', (models) => {
         wsManager?.send({ type: 'models_available', models });
     });
     // ── WebSocket events ────────────────────────────────────────────
     wsManager.on('connected', async () => {
-        statusBar?.setConnected();
+        statusManager?.update({ phone: 'connected' });
         vscode__WEBPACK_IMPORTED_MODULE_0__.window.showInformationMessage('PocketPilot: Phone connected!');
         // Always send the connected message first, even if workspace info lookup fails.
-        // Without this, the phone stays stuck at "authenticating" / "Disconnected".
         let info = { project: 'Unknown', branch: 'main' };
         try {
             info = await session.getWorkspaceInfo();
@@ -12971,16 +13687,12 @@ async function activate(context) {
             mode: session.currentMode,
             hasHistory: session.hasHistory,
         });
+        statusManager?.update({ model: session.currentModel, mode: session.currentMode });
         // Send available models so the phone only shows what the user has access to
         session.emitAvailableModels().catch(() => { });
     });
     wsManager.on('disconnected', () => {
-        if (tunnelManager?.isRunning) {
-            statusBar?.setTunnelReady();
-        }
-        else {
-            statusBar?.setWaiting();
-        }
+        statusManager?.update({ phone: 'disconnected' });
         session?.resetSessionPermissions();
         session?.cancelCurrentTask().catch(() => { });
         vscode__WEBPACK_IMPORTED_MODULE_0__.window.showInformationMessage('PocketPilot: Phone disconnected');
@@ -12988,52 +13700,7 @@ async function activate(context) {
     wsManager.on('message', (msg) => {
         handleIncomingMessage(msg);
     });
-    // ── Start WebSocket server ──────────────────────────────────────
-    const startServer = vscode__WEBPACK_IMPORTED_MODULE_0__.commands.registerCommand('pocketpilot.startServer', async () => {
-        if (wsManager?.isConnected) {
-            vscode__WEBPACK_IMPORTED_MODULE_0__.window.showWarningMessage('PocketPilot server already running');
-            return;
-        }
-        try {
-            await wsManager.start(WS_PORT);
-            statusBar?.setWaiting();
-            vscode__WEBPACK_IMPORTED_MODULE_0__.window.showInformationMessage(`PocketPilot server ready on port ${WS_PORT}`);
-        }
-        catch (err) {
-            statusBar?.setError('port busy');
-            vscode__WEBPACK_IMPORTED_MODULE_0__.window.showErrorMessage(`PocketPilot: Failed to start — ${err.message}`);
-        }
-    });
-    const stopServer = vscode__WEBPACK_IMPORTED_MODULE_0__.commands.registerCommand('pocketpilot.stopServer', () => {
-        wsManager?.stop();
-        tunnelManager?.stop();
-        statusBar?.setWaiting();
-        vscode__WEBPACK_IMPORTED_MODULE_0__.window.showInformationMessage('PocketPilot server stopped');
-    });
-    // ── Tunnel commands ─────────────────────────────────────────────
-    const enableTunnel = vscode__WEBPACK_IMPORTED_MODULE_0__.commands.registerCommand('pocketpilot.enableTunnel', async () => {
-        try {
-            statusBar?.setBusy('Starting tunnel…');
-            const url = await tunnelManager.start(WS_PORT, (msg) => {
-                statusBar?.setBusy(msg);
-            });
-            statusBar?.setTunnelReady();
-            const via = tunnelManager.provider ? ` via ${tunnelManager.provider}` : '';
-            vscode__WEBPACK_IMPORTED_MODULE_0__.window.showInformationMessage(`✅ PocketPilot tunnel ready${via}: ${url}`);
-        }
-        catch (err) {
-            statusBar?.setError('tunnel failed');
-            const action = await vscode__WEBPACK_IMPORTED_MODULE_0__.window.showErrorMessage(`PocketPilot tunnel error: ${err.message}`, 'Retry', 'Dismiss');
-            if (action === 'Retry') {
-                vscode__WEBPACK_IMPORTED_MODULE_0__.commands.executeCommand('pocketpilot.enableTunnel');
-            }
-        }
-    });
-    const disableTunnel = vscode__WEBPACK_IMPORTED_MODULE_0__.commands.registerCommand('pocketpilot.disableTunnel', () => {
-        tunnelManager?.stop();
-        vscode__WEBPACK_IMPORTED_MODULE_0__.window.showInformationMessage('PocketPilot tunnel stopped');
-    });
-    // ── QR code ─────────────────────────────────────────────────────
+    // ── Commands ────────────────────────────────────────────────────
     const showQR = vscode__WEBPACK_IMPORTED_MODULE_0__.commands.registerCommand('pocketpilot.showQRCode', async () => {
         await qrPanel.show(context, {
             authToken: authToken,
@@ -13041,7 +13708,38 @@ async function activate(context) {
             tunnelUrl: tunnelManager?.tunnelUrl ?? null,
         });
     });
-    // ── Utility commands ────────────────────────────────────────────
+    const toggleTunnel = vscode__WEBPACK_IMPORTED_MODULE_0__.commands.registerCommand('pocketpilot.toggleTunnel', async () => {
+        if (tunnelManager?.isRunning) {
+            // Disable tunnel
+            tunnelManager.stop();
+            statusManager?.update({ tunnel: 'off', tunnelUrl: null, tunnelProvider: '' });
+            vscode__WEBPACK_IMPORTED_MODULE_0__.window.showInformationMessage('PocketPilot tunnel stopped');
+        }
+        else {
+            // Enable tunnel
+            try {
+                statusManager?.update({ tunnel: 'starting' });
+                const url = await tunnelManager.start(WS_PORT, (msg) => {
+                    statusManager?.update({ activity: msg });
+                });
+                statusManager?.update({
+                    tunnel: 'active',
+                    tunnelUrl: url,
+                    tunnelProvider: tunnelManager.provider || '',
+                    activity: '',
+                });
+                const via = tunnelManager.provider ? ` via ${tunnelManager.provider}` : '';
+                vscode__WEBPACK_IMPORTED_MODULE_0__.window.showInformationMessage(`✅ PocketPilot tunnel ready${via}: ${url}`);
+            }
+            catch (err) {
+                statusManager?.update({ tunnel: 'error', tunnelUrl: null, activity: '' });
+                const action = await vscode__WEBPACK_IMPORTED_MODULE_0__.window.showErrorMessage(`PocketPilot tunnel error: ${err.message}`, 'Retry', 'Dismiss');
+                if (action === 'Retry') {
+                    vscode__WEBPACK_IMPORTED_MODULE_0__.commands.executeCommand('pocketpilot.toggleTunnel');
+                }
+            }
+        }
+    });
     const copyToken = vscode__WEBPACK_IMPORTED_MODULE_0__.commands.registerCommand('pocketpilot.copyAuthToken', async () => {
         await vscode__WEBPACK_IMPORTED_MODULE_0__.env.clipboard.writeText(authToken);
         vscode__WEBPACK_IMPORTED_MODULE_0__.window.showInformationMessage('PocketPilot: Auth token copied to clipboard');
@@ -13069,21 +13767,21 @@ async function activate(context) {
     });
     participant.iconPath = new vscode__WEBPACK_IMPORTED_MODULE_0__.ThemeIcon('rocket');
     // ── Register disposables ────────────────────────────────────────
-    context.subscriptions.push(startServer, stopServer, enableTunnel, disableTunnel, showQR, copyToken, clearHistory, participant, { dispose: () => statusBar?.dispose() }, { dispose: () => wsManager?.stop() }, { dispose: () => tunnelManager?.stop() }, { dispose: () => qrPanel?.dispose() }, { dispose: () => outputChannel?.dispose() });
+    context.subscriptions.push(showQR, toggleTunnel, copyToken, clearHistory, participant, { dispose: () => statusManager?.dispose() }, { dispose: () => wsManager?.stop() }, { dispose: () => tunnelManager?.stop() }, { dispose: () => qrPanel?.dispose() }, { dispose: () => outputChannel?.dispose() });
     // ── Auto-start the server ───────────────────────────────────────
     try {
         await wsManager.start(WS_PORT);
-        statusBar.setWaiting();
+        statusManager.update({ server: 'running' });
     }
     catch {
-        statusBar.setError('port busy');
+        statusManager.update({ server: 'stopped' });
     }
 }
 async function deactivate() {
     await session?.stopClient().catch(() => { });
     wsManager?.stop();
     tunnelManager?.stop();
-    statusBar?.dispose();
+    statusManager?.dispose();
     qrPanel?.dispose();
     outputChannel?.dispose();
 }
@@ -13099,37 +13797,27 @@ function handleIncomingMessage(msg) {
                 outputChannelRevealed = true;
                 outputChannel?.show(true); // true = preserve editor focus
             }
-            statusBar?.setBusy('generating…');
+            statusManager?.update({ session: 'busy', activity: 'generating…' });
             session?.sendPrompt(msg.content, msg.mode, msg.model, msg.attachments).catch((err) => {
                 // Prevent unhandled promise rejection from crashing the extension host
                 const message = err?.message ?? 'Unknown error sending prompt';
                 outputChannel?.appendLine(`[Error] sendPrompt crashed: ${message}`);
                 wsManager?.send({ type: 'error', code: 'REQUEST_FAILED', message });
                 wsManager?.send({ type: 'done' });
-                if (wsManager?.isConnected) {
-                    statusBar?.setConnected();
-                }
-                else {
-                    statusBar?.setWaiting();
-                }
+                statusManager?.update({ session: 'idle', activity: '' });
             });
             break;
         case 'switch_model':
-            statusBar?.setBusy('switching model…');
+            statusManager?.update({ activity: 'switching model…' });
             session?.switchModel(msg.model).catch((err) => {
                 outputChannel?.appendLine(`[Error] switchModel: ${err?.message}`);
             }).finally(() => {
-                // Always restore status bar after model switch
-                if (wsManager?.isConnected) {
-                    statusBar?.setConnected();
-                }
-                else {
-                    statusBar?.setWaiting();
-                }
+                statusManager?.update({ activity: '' });
             });
             break;
         case 'switch_mode':
             session?.switchMode(msg.mode);
+            statusManager?.update({ mode: msg.mode });
             break;
         case 'permission':
             session?.resolvePermission(msg.id, msg.decision);
@@ -13161,17 +13849,8 @@ function handleIncomingMessage(msg) {
             break;
         case 'cancel_task':
             session?.cancelCurrentTask().catch(() => { });
-            if (wsManager?.isConnected) {
-                statusBar?.setConnected();
-            }
-            else if (tunnelManager?.isRunning) {
-                statusBar?.setTunnelReady();
-            }
-            else {
-                statusBar?.setWaiting();
-            }
+            statusManager?.update({ session: 'idle', activity: '' });
             // IMPORTANT: Send 'done' so the phone's isGenerating flag resets.
-            // Without this, the phone UI stays stuck in "generating" state.
             wsManager?.send({ type: 'done' });
             wsManager?.send({ type: 'notification', title: 'Cancelled', body: 'Task cancelled' });
             break;

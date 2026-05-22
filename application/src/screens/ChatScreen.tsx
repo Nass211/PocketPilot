@@ -15,6 +15,7 @@ import ConnectionStatus from '../components/ConnectionStatus';
 import PermissionModal, { PermissionRequestPayload } from '../components/PermissionModal';
 import UserInputModal, { UserInputRequestPayload } from '../components/UserInputModal';
 import ActionButtons, { ActionButtonPayload } from '../components/ActionButtons';
+import { FilesModifiedSummary } from '../components/DiffViewer';
 import { Mode, MessageAttachment } from '../types/messages';
 import { useNavigation } from '@react-navigation/native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
@@ -193,6 +194,7 @@ export default function ChatScreen({ navigation, route }: any) {
     setInput('');
     setAttachments([]);
     setOverrideModel(false);
+    ws.clearModifiedFiles();
   };
 
   const handleCancel = () => {
@@ -337,6 +339,11 @@ export default function ChatScreen({ navigation, route }: any) {
             }}
           />
         )}
+        ListFooterComponent={
+          !chat.isGenerating && ws.modifiedFiles.length > 0
+            ? <FilesModifiedSummary files={ws.modifiedFiles} />
+            : null
+        }
         contentContainerStyle={styles.listContent}
         onContentSizeChange={() => flatListRef.current?.scrollToEnd({ animated: true })}
         onLayout={() => flatListRef.current?.scrollToEnd({ animated: true })}

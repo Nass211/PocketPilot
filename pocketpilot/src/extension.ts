@@ -1,16 +1,17 @@
 import * as vscode from 'vscode';
 import { randomUUID } from 'crypto';
 import { WebSocketManager } from './WebSocketManager';
-import { StatusBarManager } from './StatusBarManager';
+import { StatusManager } from './StatusManager';
 import { TunnelManager } from './TunnelManager';
 import { QRCodePanel } from './QRCodePanel';
+import { SidebarProvider } from './SidebarProvider';
 import { SessionManager } from './SessionManager';
 import type { IncomingMessage, ActionButton } from './types';
 
 const WS_PORT = 3000;
 
 let wsManager: WebSocketManager | null = null;
-let statusBar: StatusBarManager | null = null;
+let statusManager: StatusManager | null = null;
 let tunnelManager: TunnelManager | null = null;
 let qrPanel: QRCodePanel | null = null;
 let session: SessionManager | null = null;
@@ -28,13 +29,24 @@ export async function activate(context: vscode.ExtensionContext) {
 
 	// ── Managers ────────────────────────────────────────────────────
 	outputChannel = vscode.window.createOutputChannel('PocketPilot');
-	statusBar = new StatusBarManager();
-	statusBar.show();
-
+	statusManager = new StatusManager();
 	tunnelManager = new TunnelManager(context.extensionPath);
 	qrPanel = new QRCodePanel();
 	wsManager = new WebSocketManager(authToken);
 	session = new SessionManager(context);
+
+	// ── Sidebar Dashboard ──────────────────────────────────────────
+	const sidebarProvider = new SidebarProvider(
+		context.extensionUri,
+		statusManager,
+		authToken,
+	);
+	context.subscriptions.push(
+		vscode.window.registerWebviewViewProvider(
+			SidebarProvider.viewType,
+			sidebarProvider,
+		),
+	);
 
 	// Start the Copilot SDK client in the background
 	session.startClient().catch((err) => {
@@ -52,39 +64,24 @@ export async function activate(context: vscode.ExtensionContext) {
 	session.on('done', () => {
 		wsManager?.send({ type: 'done' });
 		outputChannel?.appendLine('\n');
-		// Restore to the correct idle state
-		if (wsManager?.isConnected) {
-			statusBar?.setConnected();
-		} else if (tunnelManager?.isRunning) {
-			statusBar?.setTunnelReady();
-		} else {
-			statusBar?.setWaiting();
-		}
+		statusManager?.update({ session: 'idle', activity: '' });
 	});
 
 	session.on('error', (code: string, message: string) => {
 		wsManager?.send({ type: 'error', code, message });
 		outputChannel?.appendLine(`[Error] ${code}: ${message}`);
-		// Brief error flash, then restore correct idle state
-		statusBar?.setError('error');
-		setTimeout(() => {
-			if (wsManager?.isConnected) {
-				statusBar?.setConnected();
-			} else if (tunnelManager?.isRunning) {
-				statusBar?.setTunnelReady();
-			} else {
-				statusBar?.setWaiting();
-			}
-		}, 3000);
+		statusManager?.update({ session: 'idle', activity: '' });
 	});
 
 	session.on('model_switched', (model: string) => {
 		wsManager?.send({ type: 'model_switched', model });
+		statusManager?.update({ model });
 		outputChannel?.appendLine(`[Model] Switched to: ${model}`);
 	});
 
 	session.on('mode_switched', (mode: string) => {
 		wsManager?.send({ type: 'mode_switched', mode });
+		statusManager?.update({ mode });
 		outputChannel?.appendLine(`[Mode] Switched to: ${mode}`);
 	});
 
@@ -111,6 +108,11 @@ export async function activate(context: vscode.ExtensionContext) {
 
 	session.on('activity', (label: string) => {
 		wsManager?.send({ type: 'activity', label });
+		statusManager?.update({ activity: label });
+	});
+
+	session.on('files_modified', (files: Array<{ file: string; additions: number; deletions: number; diff: string }>) => {
+		wsManager?.send({ type: 'files_modified', files });
 	});
 
 	session.on('models_available', (models: Array<{ id: string; displayName: string; vendor: string }>) => {
@@ -119,11 +121,10 @@ export async function activate(context: vscode.ExtensionContext) {
 
 	// ── WebSocket events ────────────────────────────────────────────
 	wsManager.on('connected', async () => {
-		statusBar?.setConnected();
+		statusManager?.update({ phone: 'connected' });
 		vscode.window.showInformationMessage('PocketPilot: Phone connected!');
 
 		// Always send the connected message first, even if workspace info lookup fails.
-		// Without this, the phone stays stuck at "authenticating" / "Disconnected".
 		let info = { project: 'Unknown', branch: 'main' };
 		try {
 			info = await session!.getWorkspaceInfo();
@@ -138,16 +139,14 @@ export async function activate(context: vscode.ExtensionContext) {
 			hasHistory: session!.hasHistory,
 		});
 
+		statusManager?.update({ model: session!.currentModel, mode: session!.currentMode });
+
 		// Send available models so the phone only shows what the user has access to
 		session!.emitAvailableModels().catch(() => { /* best effort */ });
 	});
 
 	wsManager.on('disconnected', () => {
-		if (tunnelManager?.isRunning) {
-			statusBar?.setTunnelReady();
-		} else {
-			statusBar?.setWaiting();
-		}
+		statusManager?.update({ phone: 'disconnected' });
 		session?.resetSessionPermissions();
 		session?.cancelCurrentTask().catch(() => { });
 		vscode.window.showInformationMessage('PocketPilot: Phone disconnected');
@@ -157,58 +156,7 @@ export async function activate(context: vscode.ExtensionContext) {
 		handleIncomingMessage(msg);
 	});
 
-	// ── Start WebSocket server ──────────────────────────────────────
-	const startServer = vscode.commands.registerCommand('pocketpilot.startServer', async () => {
-		if (wsManager?.isConnected) {
-			vscode.window.showWarningMessage('PocketPilot server already running');
-			return;
-		}
-		try {
-			await wsManager!.start(WS_PORT);
-			statusBar?.setWaiting();
-			vscode.window.showInformationMessage(`PocketPilot server ready on port ${WS_PORT}`);
-		} catch (err: any) {
-			statusBar?.setError('port busy');
-			vscode.window.showErrorMessage(`PocketPilot: Failed to start — ${err.message}`);
-		}
-	});
-
-	const stopServer = vscode.commands.registerCommand('pocketpilot.stopServer', () => {
-		wsManager?.stop();
-		tunnelManager?.stop();
-		statusBar?.setWaiting();
-		vscode.window.showInformationMessage('PocketPilot server stopped');
-	});
-
-	// ── Tunnel commands ─────────────────────────────────────────────
-	const enableTunnel = vscode.commands.registerCommand('pocketpilot.enableTunnel', async () => {
-		try {
-			statusBar?.setBusy('Starting tunnel…');
-			const url = await tunnelManager!.start(WS_PORT, (msg) => {
-				statusBar?.setBusy(msg);
-			});
-			statusBar?.setTunnelReady();
-			const via = tunnelManager!.provider ? ` via ${tunnelManager!.provider}` : '';
-			vscode.window.showInformationMessage(`✅ PocketPilot tunnel ready${via}: ${url}`);
-		} catch (err: any) {
-			statusBar?.setError('tunnel failed');
-			const action = await vscode.window.showErrorMessage(
-				`PocketPilot tunnel error: ${err.message}`,
-				'Retry',
-				'Dismiss'
-			);
-			if (action === 'Retry') {
-				vscode.commands.executeCommand('pocketpilot.enableTunnel');
-			}
-		}
-	});
-
-	const disableTunnel = vscode.commands.registerCommand('pocketpilot.disableTunnel', () => {
-		tunnelManager?.stop();
-		vscode.window.showInformationMessage('PocketPilot tunnel stopped');
-	});
-
-	// ── QR code ─────────────────────────────────────────────────────
+	// ── Commands ────────────────────────────────────────────────────
 	const showQR = vscode.commands.registerCommand('pocketpilot.showQRCode', async () => {
 		await qrPanel!.show(context, {
 			authToken: authToken!,
@@ -217,7 +165,41 @@ export async function activate(context: vscode.ExtensionContext) {
 		});
 	});
 
-	// ── Utility commands ────────────────────────────────────────────
+	const toggleTunnel = vscode.commands.registerCommand('pocketpilot.toggleTunnel', async () => {
+		if (tunnelManager?.isRunning) {
+			// Disable tunnel
+			tunnelManager.stop();
+			statusManager?.update({ tunnel: 'off', tunnelUrl: null, tunnelProvider: '' });
+			vscode.window.showInformationMessage('PocketPilot tunnel stopped');
+		} else {
+			// Enable tunnel
+			try {
+				statusManager?.update({ tunnel: 'starting' });
+				const url = await tunnelManager!.start(WS_PORT, (msg) => {
+					statusManager?.update({ activity: msg });
+				});
+				statusManager?.update({
+					tunnel: 'active',
+					tunnelUrl: url,
+					tunnelProvider: tunnelManager!.provider || '',
+					activity: '',
+				});
+				const via = tunnelManager!.provider ? ` via ${tunnelManager!.provider}` : '';
+				vscode.window.showInformationMessage(`✅ PocketPilot tunnel ready${via}: ${url}`);
+			} catch (err: any) {
+				statusManager?.update({ tunnel: 'error', tunnelUrl: null, activity: '' });
+				const action = await vscode.window.showErrorMessage(
+					`PocketPilot tunnel error: ${err.message}`,
+					'Retry',
+					'Dismiss'
+				);
+				if (action === 'Retry') {
+					vscode.commands.executeCommand('pocketpilot.toggleTunnel');
+				}
+			}
+		}
+	});
+
 	const copyToken = vscode.commands.registerCommand('pocketpilot.copyAuthToken', async () => {
 		await vscode.env.clipboard.writeText(authToken!);
 		vscode.window.showInformationMessage('PocketPilot: Auth token copied to clipboard');
@@ -254,15 +236,12 @@ export async function activate(context: vscode.ExtensionContext) {
 
 	// ── Register disposables ────────────────────────────────────────
 	context.subscriptions.push(
-		startServer,
-		stopServer,
-		enableTunnel,
-		disableTunnel,
 		showQR,
+		toggleTunnel,
 		copyToken,
 		clearHistory,
 		participant,
-		{ dispose: () => statusBar?.dispose() },
+		{ dispose: () => statusManager?.dispose() },
 		{ dispose: () => wsManager?.stop() },
 		{ dispose: () => tunnelManager?.stop() },
 		{ dispose: () => qrPanel?.dispose() },
@@ -272,9 +251,9 @@ export async function activate(context: vscode.ExtensionContext) {
 	// ── Auto-start the server ───────────────────────────────────────
 	try {
 		await wsManager.start(WS_PORT);
-		statusBar.setWaiting();
+		statusManager.update({ server: 'running' });
 	} catch {
-		statusBar.setError('port busy');
+		statusManager.update({ server: 'stopped' });
 	}
 }
 
@@ -282,7 +261,7 @@ export async function deactivate() {
 	await session?.stopClient().catch(() => { });
 	wsManager?.stop();
 	tunnelManager?.stop();
-	statusBar?.dispose();
+	statusManager?.dispose();
 	qrPanel?.dispose();
 	outputChannel?.dispose();
 }
@@ -300,37 +279,29 @@ function handleIncomingMessage(msg: IncomingMessage): void {
 				outputChannelRevealed = true;
 				outputChannel?.show(true); // true = preserve editor focus
 			}
-			statusBar?.setBusy('generating…');
+			statusManager?.update({ session: 'busy', activity: 'generating…' });
 			session?.sendPrompt(msg.content, msg.mode, msg.model, msg.attachments).catch((err) => {
 				// Prevent unhandled promise rejection from crashing the extension host
 				const message = err?.message ?? 'Unknown error sending prompt';
 				outputChannel?.appendLine(`[Error] sendPrompt crashed: ${message}`);
 				wsManager?.send({ type: 'error', code: 'REQUEST_FAILED', message });
 				wsManager?.send({ type: 'done' });
-				if (wsManager?.isConnected) {
-					statusBar?.setConnected();
-				} else {
-					statusBar?.setWaiting();
-				}
+				statusManager?.update({ session: 'idle', activity: '' });
 			});
 			break;
 
 		case 'switch_model':
-			statusBar?.setBusy('switching model…');
+			statusManager?.update({ activity: 'switching model…' });
 			session?.switchModel(msg.model).catch((err) => {
 				outputChannel?.appendLine(`[Error] switchModel: ${err?.message}`);
 			}).finally(() => {
-				// Always restore status bar after model switch
-				if (wsManager?.isConnected) {
-					statusBar?.setConnected();
-				} else {
-					statusBar?.setWaiting();
-				}
+				statusManager?.update({ activity: '' });
 			});
 			break;
 
 		case 'switch_mode':
 			session?.switchMode(msg.mode);
+			statusManager?.update({ mode: msg.mode });
 			break;
 
 		case 'permission':
@@ -368,15 +339,8 @@ function handleIncomingMessage(msg: IncomingMessage): void {
 
 		case 'cancel_task':
 			session?.cancelCurrentTask().catch(() => { });
-			if (wsManager?.isConnected) {
-				statusBar?.setConnected();
-			} else if (tunnelManager?.isRunning) {
-				statusBar?.setTunnelReady();
-			} else {
-				statusBar?.setWaiting();
-			}
+			statusManager?.update({ session: 'idle', activity: '' });
 			// IMPORTANT: Send 'done' so the phone's isGenerating flag resets.
-			// Without this, the phone UI stays stuck in "generating" state.
 			wsManager?.send({ type: 'done' });
 			wsManager?.send({ type: 'notification', title: 'Cancelled', body: 'Task cancelled' });
 			break;

@@ -105,6 +105,9 @@ export class SessionManager extends EventEmitter {
     // Event unsubscribe functions for the current session
     private eventUnsubs: (() => void)[] = [];
 
+    // Workspace file state snapshot — taken before each prompt to detect changes
+    private fileHashesBaseline: Map<string, string> = new Map();
+
     private static readonly MODE_INSTRUCTIONS: Record<string, string> = {
         ask: [
             'You are a helpful coding assistant.',
@@ -373,6 +376,7 @@ export class SessionManager extends EventEmitter {
             if (this.isBusy) {
                 this.isBusy = false;
                 this.emit('activity', ''); // Clear activity status
+                this.emitModifiedFiles(); // Send file diffs to phone
                 this.emit('done');
 
                 // In plan mode, offer action buttons
@@ -415,14 +419,22 @@ export class SessionManager extends EventEmitter {
         // Tool execution start → emit inline progress AND activity status
         this.eventUnsubs.push(session.on('tool.execution_start', (event) => {
             const toolName = event.data.toolName || 'tool';
+            const args = (event.data as any).arguments || {};
 
-            // Format a human-readable activity label
+            // Format a human-readable activity label with detail
             const label = this.formatToolLabel(toolName);
-            this.emit('activity', label);
+            const detail = this.formatToolDetail(toolName, args);
+            const fullLabel = detail ? `${label}: ${detail}` : label;
+
+            this.emit('activity', fullLabel);
             this.emit('notification', 'Tool Running', `Running: ${toolName}`);
 
             // Emit inline thinking chunk so the user sees what's happening in the chat
-            this.emit('chunk', `\n\n> 🔧 **${label}**\n\n`);
+            if (detail) {
+                this.emit('chunk', `\n\n> 🔧 **${label}:** \`${detail}\`\n\n`);
+            } else {
+                this.emit('chunk', `\n\n> 🔧 **${label}**\n\n`);
+            }
         }));
 
         // Tool execution complete → update inline progress
@@ -460,6 +472,171 @@ export class SessionManager extends EventEmitter {
         return labels[toolName] || toolName.replace(/_/g, ' ');
     }
 
+    /** Extract the most relevant detail string from a tool's arguments */
+    private formatToolDetail(toolName: string, args: Record<string, any>): string {
+        // Try to get the most useful argument for each tool type
+        switch (toolName) {
+            case 'bash':
+            case 'run_command':
+            case 'execute_command': {
+                const cmd = args.command || args.cmd || args.input || '';
+                // Truncate long commands
+                return typeof cmd === 'string' ? (cmd.length > 80 ? cmd.slice(0, 77) + '...' : cmd) : '';
+            }
+            case 'read_file':
+            case 'edit_file':
+            case 'write_file':
+            case 'create_file':
+            case 'delete_file':
+            case 'view': {
+                const path = args.path || args.file || args.filePath || args.filename || '';
+                // Show just the filename for brevity
+                if (typeof path === 'string' && path.includes('/')) {
+                    return path.split('/').pop() || path;
+                }
+                return path;
+            }
+            case 'grep_search':
+            case 'search_files':
+            case 'file_search': {
+                const query = args.query || args.pattern || args.search || '';
+                return typeof query === 'string' ? query : '';
+            }
+            case 'list_directory': {
+                const dir = args.path || args.directory || args.dir || '';
+                return typeof dir === 'string' ? dir : '';
+            }
+            default:
+                return '';
+        }
+    }
+
+    // ── Workspace diff tracking ─────────────────────────────────────
+
+    /**
+     * Snapshot the current workspace state before each prompt.
+     * We record which files are already dirty (modified/staged) so that after
+     * the agent finishes, we only report files that WEREN'T dirty before.
+     */
+    private snapshotWorkspaceState(): void {
+        const wsFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        if (!wsFolder) { this.fileHashesBaseline.clear(); return; }
+
+        try {
+            // Get all files that currently differ from HEAD (staged + unstaged)
+            const output = execSync(
+                'git diff HEAD --name-only 2>/dev/null || true',
+                { cwd: wsFolder, encoding: 'utf-8', timeout: 5000 }
+            ).trim();
+
+            this.fileHashesBaseline.clear();
+            for (const file of output.split('\n').filter(Boolean)) {
+                this.fileHashesBaseline.set(file, 'pre-existing');
+            }
+
+            // Also include untracked files in baseline
+            const untracked = execSync(
+                'git ls-files --others --exclude-standard 2>/dev/null || true',
+                { cwd: wsFolder, encoding: 'utf-8', timeout: 5000 }
+            ).trim();
+            for (const file of untracked.split('\n').filter(Boolean)) {
+                this.fileHashesBaseline.set(file, 'untracked');
+            }
+        } catch {
+            this.fileHashesBaseline.clear();
+        }
+    }
+
+    /** Compare current workspace state against baseline and emit modified files with diffs */
+    private emitModifiedFiles(): void {
+        const wsFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        if (!wsFolder) return;
+
+        try {
+            // Get ALL files that now differ from HEAD (staged + unstaged)
+            const nowDirty = execSync(
+                'git diff HEAD --name-only 2>/dev/null || true',
+                { cwd: wsFolder, encoding: 'utf-8', timeout: 5000 }
+            ).trim();
+
+            // Also check for newly untracked files
+            const nowUntracked = execSync(
+                'git ls-files --others --exclude-standard 2>/dev/null || true',
+                { cwd: wsFolder, encoding: 'utf-8', timeout: 5000 }
+            ).trim();
+
+            // Combine and filter to only files that are NEW since snapshot
+            const allCurrentFiles = new Set<string>();
+            for (const f of nowDirty.split('\n').filter(Boolean)) {
+                allCurrentFiles.add(f);
+            }
+            for (const f of nowUntracked.split('\n').filter(Boolean)) {
+                allCurrentFiles.add(f);
+            }
+
+            // Only keep files that were NOT already dirty before the prompt
+            const newlyChanged: string[] = [];
+            for (const file of allCurrentFiles) {
+                if (!this.fileHashesBaseline.has(file)) {
+                    newlyChanged.push(file);
+                }
+            }
+
+            if (newlyChanged.length === 0) return;
+
+            const modifiedFiles: Array<{ file: string; additions: number; deletions: number; diff: string }> = [];
+
+            for (const file of newlyChanged) {
+                try {
+                    // Skip binary files and build artifacts
+                    if (/\.(jpg|jpeg|png|gif|ico|woff|ttf|eot|map)$/i.test(file)) continue;
+                    if (file.includes('node_modules/') || file.includes('dist/') || file.includes('.pocketpilot/')) continue;
+
+                    // Use diff HEAD to capture both staged and unstaged changes
+                    const diffStr = execSync(
+                        `git diff HEAD -- "${file}" 2>/dev/null || true`,
+                        { cwd: wsFolder, encoding: 'utf-8', timeout: 5000, maxBuffer: 1024 * 256 }
+                    ).trim();
+
+                    if (!diffStr) {
+                        // Might be a new untracked file — show as all additions
+                        try {
+                            const content = require('fs').readFileSync(
+                                require('path').join(wsFolder, file), 'utf-8'
+                            );
+                            const lines = content.split('\n');
+                            modifiedFiles.push({
+                                file,
+                                additions: lines.length,
+                                deletions: 0,
+                                diff: `--- /dev/null\n+++ b/${file}\n@@ -0,0 +1,${lines.length} @@\n` +
+                                      lines.map((l: string) => `+${l}`).join('\n'),
+                            });
+                        } catch { /* skip unreadable */ }
+                        continue;
+                    }
+
+                    // Count additions and deletions
+                    let additions = 0, deletions = 0;
+                    for (const line of diffStr.split('\n')) {
+                        if (line.startsWith('+') && !line.startsWith('+++')) additions++;
+                        if (line.startsWith('-') && !line.startsWith('---')) deletions++;
+                    }
+
+                    modifiedFiles.push({ file, additions, deletions, diff: diffStr });
+                } catch {
+                    // Skip files we can't diff
+                }
+            }
+
+            if (modifiedFiles.length > 0) {
+                this.emit('files_modified', modifiedFiles);
+            }
+        } catch {
+            // Best-effort — don't crash on diff failure
+        }
+    }
+
     private async destroySession(): Promise<void> {
         for (const unsub of this.eventUnsubs) { unsub(); }
         this.eventUnsubs = [];
@@ -493,6 +670,9 @@ export class SessionManager extends EventEmitter {
 
         this.isBusy = true;
         this._hasHistory = true;
+
+        // Snapshot git state so we can detect which files the agent modified
+        this.snapshotWorkspaceState();
 
         const previousModel = this._currentModel;
 

@@ -1,280 +1,358 @@
 import React, { useMemo, useEffect, useRef, useState } from 'react';
 import {
-  View, Text, TouchableOpacity, StyleSheet, ScrollView, Animated,
+  View, Text, TouchableOpacity, StyleSheet, ScrollView, Animated, Modal,
+  SafeAreaView,
 } from 'react-native';
 import { useTheme, ThemeColors } from '../context/ThemeContext';
 
-export interface DiffPayload {
-  id: string;
+export interface ModifiedFileInfo {
   file: string;
-  before: string;
-  after: string;
-}
-
-interface DiffViewerProps {
-  diff: DiffPayload;
-  onAccept: (id: string) => void;
-  onReject: (id: string) => void;
+  additions: number;
+  deletions: number;
+  diff: string;
 }
 
 interface DiffLine {
-  type: 'add' | 'remove' | 'context';
+  type: 'add' | 'remove' | 'context' | 'header';
   content: string;
-  lineNum?: number;
 }
 
-/**
- * Compute a simple unified-style diff between two strings.
- * Shows removed lines (from `before`), added lines (from `after`),
- * and unchanged context lines.
- */
-function computeDiff(before: string, after: string): DiffLine[] {
-  const beforeLines = before.split('\n');
-  const afterLines = after.split('\n');
+/** Parse a unified diff string into displayable lines */
+function parseUnifiedDiff(diff: string): DiffLine[] {
+  const lines = diff.split('\n');
   const result: DiffLine[] = [];
 
-  // Simple LCS-based diff
-  const m = beforeLines.length;
-  const n = afterLines.length;
-
-  // Build LCS table
-  const dp: number[][] = Array.from({ length: m + 1 }, () => Array(n + 1).fill(0));
-  for (let i = 1; i <= m; i++) {
-    for (let j = 1; j <= n; j++) {
-      if (beforeLines[i - 1] === afterLines[j - 1]) {
-        dp[i][j] = dp[i - 1][j - 1] + 1;
-      } else {
-        dp[i][j] = Math.max(dp[i - 1][j], dp[i][j - 1]);
-      }
-    }
-  }
-
-  // Backtrack to build diff
-  const diffItems: DiffLine[] = [];
-  let i = m, j = n;
-  while (i > 0 || j > 0) {
-    if (i > 0 && j > 0 && beforeLines[i - 1] === afterLines[j - 1]) {
-      diffItems.unshift({ type: 'context', content: beforeLines[i - 1], lineNum: j });
-      i--; j--;
-    } else if (j > 0 && (i === 0 || dp[i][j - 1] >= dp[i - 1][j])) {
-      diffItems.unshift({ type: 'add', content: afterLines[j - 1], lineNum: j });
-      j--;
+  for (const line of lines) {
+    if (line.startsWith('@@')) {
+      result.push({ type: 'header', content: line });
+    } else if (line.startsWith('+') && !line.startsWith('+++')) {
+      result.push({ type: 'add', content: line.slice(1) });
+    } else if (line.startsWith('-') && !line.startsWith('---')) {
+      result.push({ type: 'remove', content: line.slice(1) });
+    } else if (line.startsWith('diff ') || line.startsWith('index ') || line.startsWith('---') || line.startsWith('+++')) {
+      // Skip diff metadata headers
     } else {
-      diffItems.unshift({ type: 'remove', content: beforeLines[i - 1], lineNum: i });
-      i--;
+      result.push({ type: 'context', content: line.startsWith(' ') ? line.slice(1) : line });
     }
   }
 
-  return diffItems;
+  return result;
 }
 
-export default function DiffViewer({ diff, onAccept, onReject }: DiffViewerProps) {
+/** Get file extension label with color */
+function getFileTag(file: string): { label: string; color: string } {
+  const ext = file.split('.').pop()?.toLowerCase() || '';
+  const tags: Record<string, { label: string; color: string }> = {
+    'ts': { label: 'TS', color: '#3178C6' },
+    'tsx': { label: 'TSX', color: '#3178C6' },
+    'js': { label: 'JS', color: '#F7DF1E' },
+    'jsx': { label: 'JSX', color: '#61DAFB' },
+    'json': { label: 'JSON', color: '#5B5B5B' },
+    'md': { label: 'MD', color: '#083FA1' },
+    'css': { label: 'CSS', color: '#1572B6' },
+    'html': { label: 'HTML', color: '#E34C26' },
+    'py': { label: 'PY', color: '#3776AB' },
+    'rs': { label: 'RS', color: '#CE422B' },
+    'go': { label: 'GO', color: '#00ADD8' },
+    'svg': { label: 'SVG', color: '#FFB13B' },
+    'sh': { label: 'SH', color: '#4EAA25' },
+  };
+  return tags[ext] || { label: ext.toUpperCase() || '?', color: '#636366' };
+}
+
+/** Files Modified Summary — inline chat component showing chips per modified file */
+export function FilesModifiedSummary({ files }: { files: ModifiedFileInfo[] }) {
   const { colors } = useTheme();
-  const styles = useMemo(() => createStyles(colors), [colors]);
-  const slideAnim = useRef(new Animated.Value(60)).current;
-  const opacityAnim = useRef(new Animated.Value(0)).current;
-  const [expanded, setExpanded] = useState(true);
-
-  const diffLines = useMemo(() => computeDiff(diff.before, diff.after), [diff.before, diff.after]);
-
-  const stats = useMemo(() => {
-    let additions = 0, deletions = 0;
-    for (const line of diffLines) {
-      if (line.type === 'add') additions++;
-      if (line.type === 'remove') deletions++;
-    }
-    return { additions, deletions };
-  }, [diffLines]);
+  const styles = useMemo(() => createChipStyles(colors), [colors]);
+  const [selectedFile, setSelectedFile] = useState<ModifiedFileInfo | null>(null);
+  const fadeAnim = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
-    Animated.parallel([
-      Animated.spring(slideAnim, {
-        toValue: 0,
-        useNativeDriver: true,
-        tension: 50,
-        friction: 8,
-      }),
-      Animated.timing(opacityAnim, {
-        toValue: 1,
-        duration: 250,
-        useNativeDriver: true,
-      }),
-    ]).start();
-  }, [slideAnim, opacityAnim]);
+    Animated.timing(fadeAnim, {
+      toValue: 1,
+      duration: 300,
+      useNativeDriver: true,
+    }).start();
+  }, [fadeAnim]);
 
-  // Extract just the filename from a full path
-  const fileName = diff.file.split('/').pop() || diff.file;
-  const filePath = diff.file;
+  if (files.length === 0) return null;
 
   return (
-    <Animated.View
-      style={[
-        styles.container,
-        { transform: [{ translateY: slideAnim }], opacity: opacityAnim },
-      ]}
-    >
-      {/* Header */}
-      <TouchableOpacity
-        style={styles.header}
-        onPress={() => setExpanded(!expanded)}
-        activeOpacity={0.7}
-      >
-        <View style={styles.headerLeft}>
-          <Text style={styles.fileIcon}>📄</Text>
-          <View style={styles.headerTextContainer}>
-            <Text style={styles.fileName} numberOfLines={1}>{fileName}</Text>
-            <Text style={styles.filePath} numberOfLines={1}>{filePath}</Text>
+    <>
+      <Animated.View style={[styles.container, { opacity: fadeAnim }]}>
+        <View style={styles.header}>
+          <Text style={styles.title}>Files Modified</Text>
+          <View style={styles.countBadge}>
+            <Text style={styles.countText}>{files.length}</Text>
           </View>
         </View>
-        <View style={styles.headerRight}>
-          <Text style={styles.statsAdd}>+{stats.additions}</Text>
-          <Text style={styles.statsRemove}>-{stats.deletions}</Text>
-          <Text style={styles.chevron}>{expanded ? '▾' : '▸'}</Text>
-        </View>
-      </TouchableOpacity>
-
-      {/* Diff content */}
-      {expanded && (
-        <ScrollView
-          style={styles.diffScroll}
-          horizontal={false}
-          showsVerticalScrollIndicator={true}
-          nestedScrollEnabled={true}
-        >
-          <ScrollView
-            horizontal={true}
-            showsHorizontalScrollIndicator={false}
-            nestedScrollEnabled={true}
-          >
-            <View style={styles.diffContent}>
-              {diffLines.map((line, index) => (
-                <View
-                  key={index}
-                  style={[
-                    styles.diffLine,
-                    line.type === 'add' && styles.diffLineAdd,
-                    line.type === 'remove' && styles.diffLineRemove,
-                  ]}
-                >
-                  <Text
-                    style={[
-                      styles.diffLinePrefix,
-                      line.type === 'add' && styles.diffLinePrefixAdd,
-                      line.type === 'remove' && styles.diffLinePrefixRemove,
-                    ]}
-                  >
-                    {line.type === 'add' ? '+' : line.type === 'remove' ? '-' : ' '}
-                  </Text>
-                  <Text
-                    style={[
-                      styles.diffLineText,
-                      line.type === 'add' && styles.diffLineTextAdd,
-                      line.type === 'remove' && styles.diffLineTextRemove,
-                      line.type === 'context' && styles.diffLineTextContext,
-                    ]}
-                    numberOfLines={1}
-                  >
-                    {line.content || ' '}
-                  </Text>
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.chipScroll}>
+          {files.map((f, i) => {
+            const fileName = f.file.split('/').pop() || f.file;
+            const tag = getFileTag(f.file);
+            return (
+              <TouchableOpacity
+                key={i}
+                style={styles.chip}
+                onPress={() => setSelectedFile(f)}
+                activeOpacity={0.7}
+              >
+                <View style={[styles.fileTag, { backgroundColor: tag.color }]}>
+                  <Text style={styles.fileTagText}>{tag.label}</Text>
                 </View>
-              ))}
-            </View>
-          </ScrollView>
+                <Text style={styles.chipName} numberOfLines={1}>{fileName}</Text>
+                <Text style={styles.chipAdd}>+{f.additions}</Text>
+                <Text style={styles.chipDel}>-{f.deletions}</Text>
+              </TouchableOpacity>
+            );
+          })}
         </ScrollView>
-      )}
+      </Animated.View>
 
-      {/* Action buttons */}
-      <View style={styles.actions}>
-        <TouchableOpacity
-          style={[styles.actionButton, styles.rejectButton]}
-          onPress={() => onReject(diff.id)}
-          activeOpacity={0.7}
-        >
-          <Text style={styles.rejectButtonText}>✕ Reject</Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={[styles.actionButton, styles.acceptButton]}
-          onPress={() => onAccept(diff.id)}
-          activeOpacity={0.7}
-        >
-          <Text style={styles.acceptButtonText}>✓ Accept</Text>
-        </TouchableOpacity>
-      </View>
-    </Animated.View>
+      {/* Diff Viewer Modal */}
+      <Modal
+        visible={!!selectedFile}
+        animationType="slide"
+        transparent={false}
+        onRequestClose={() => setSelectedFile(null)}
+      >
+        {selectedFile && (
+          <DiffViewerModal
+            file={selectedFile}
+            onClose={() => setSelectedFile(null)}
+          />
+        )}
+      </Modal>
+    </>
   );
 }
 
-const createStyles = (colors: ThemeColors) => StyleSheet.create({
+/** Full-screen diff viewer modal */
+function DiffViewerModal({ file, onClose }: { file: ModifiedFileInfo; onClose: () => void }) {
+  const { colors } = useTheme();
+  const styles = useMemo(() => createDiffStyles(colors), [colors]);
+  const diffLines = useMemo(() => parseUnifiedDiff(file.diff), [file.diff]);
+  const fileName = file.file.split('/').pop() || file.file;
+  const tag = getFileTag(file.file);
+
+  return (
+    <SafeAreaView style={styles.container}>
+      {/* Header */}
+      <View style={styles.header}>
+        <TouchableOpacity onPress={onClose} style={styles.closeButton} activeOpacity={0.7}>
+          <Text style={styles.closeText}>←</Text>
+        </TouchableOpacity>
+        <View style={[styles.headerTag, { backgroundColor: tag.color }]}>
+          <Text style={styles.headerTagText}>{tag.label}</Text>
+        </View>
+        <View style={styles.headerInfo}>
+          <Text style={styles.headerFileName} numberOfLines={1}>{fileName}</Text>
+          <Text style={styles.headerFilePath} numberOfLines={1}>{file.file}</Text>
+        </View>
+        <View style={styles.headerStats}>
+          <Text style={styles.statsAdd}>+{file.additions}</Text>
+          <Text style={styles.statsDel}>-{file.deletions}</Text>
+        </View>
+      </View>
+
+      {/* Diff content */}
+      <ScrollView style={styles.scrollView} showsVerticalScrollIndicator={true}>
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} nestedScrollEnabled>
+          <View style={styles.diffContent}>
+            {diffLines.map((line, index) => (
+              <View
+                key={index}
+                style={[
+                  styles.diffLine,
+                  line.type === 'add' && styles.diffLineAdd,
+                  line.type === 'remove' && styles.diffLineRemove,
+                  line.type === 'header' && styles.diffLineHeader,
+                ]}
+              >
+                <Text style={styles.lineNumber}>
+                  {line.type === 'header' ? '' : String(index + 1).padStart(3)}
+                </Text>
+                <Text
+                  style={[
+                    styles.diffLinePrefix,
+                    line.type === 'add' && styles.prefixAdd,
+                    line.type === 'remove' && styles.prefixRemove,
+                    line.type === 'header' && styles.prefixHeader,
+                  ]}
+                >
+                  {line.type === 'add' ? '+' : line.type === 'remove' ? '-' : line.type === 'header' ? '@@' : ' '}
+                </Text>
+                <Text
+                  style={[
+                    styles.diffLineText,
+                    line.type === 'add' && styles.textAdd,
+                    line.type === 'remove' && styles.textRemove,
+                    line.type === 'header' && styles.textHeader,
+                    line.type === 'context' && styles.textContext,
+                  ]}
+                >
+                  {line.content || ' '}
+                </Text>
+              </View>
+            ))}
+          </View>
+        </ScrollView>
+      </ScrollView>
+    </SafeAreaView>
+  );
+}
+
+// ── Chip styles ──────────────────────────────────────────────────────
+
+const createChipStyles = (colors: ThemeColors) => StyleSheet.create({
   container: {
-    marginHorizontal: 12,
-    marginVertical: 6,
-    borderRadius: 12,
-    backgroundColor: colors.surface,
-    borderWidth: 1,
-    borderColor: colors.border,
-    overflow: 'hidden',
-    elevation: 3,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.15,
-    shadowRadius: 6,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    marginTop: 4,
   },
   header: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: 14,
-    paddingVertical: 12,
-    borderBottomWidth: 1,
-    borderBottomColor: colors.border,
+    gap: 6,
+    marginBottom: 10,
   },
-  headerLeft: {
-    flexDirection: 'row',
+  title: {
+    color: colors.textSecondary,
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  countBadge: {
+    backgroundColor: colors.border,
+    borderRadius: 10,
+    paddingHorizontal: 7,
+    paddingVertical: 1,
+    minWidth: 20,
     alignItems: 'center',
-    flex: 1,
-    marginRight: 12,
   },
-  fileIcon: {
-    fontSize: 16,
-    marginRight: 8,
-  },
-  headerTextContainer: {
-    flex: 1,
-  },
-  fileName: {
-    color: colors.text,
-    fontSize: 14,
-    fontWeight: '700',
-  },
-  filePath: {
+  countText: {
     color: colors.textSecondary,
     fontSize: 11,
-    marginTop: 1,
+    fontWeight: '700',
   },
-  headerRight: {
+  chipScroll: {
+    flexDirection: 'row',
+  },
+  chip: {
     flexDirection: 'row',
     alignItems: 'center',
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: 8,
+    paddingHorizontal: 8,
+    paddingVertical: 6,
+    marginRight: 8,
+    gap: 5,
+  },
+  fileTag: {
+    borderRadius: 3,
+    paddingHorizontal: 4,
+    paddingVertical: 1,
+  },
+  fileTagText: {
+    color: '#fff',
+    fontSize: 9,
+    fontWeight: '800',
+    letterSpacing: 0.3,
+  },
+  chipName: {
+    color: colors.text,
+    fontSize: 13,
+    fontWeight: '600',
+    maxWidth: 140,
+  },
+  chipAdd: {
+    color: '#34C759',
+    fontSize: 11,
+    fontWeight: '700',
+    fontFamily: 'monospace',
+  },
+  chipDel: {
+    color: '#FF3B30',
+    fontSize: 11,
+    fontWeight: '700',
+    fontFamily: 'monospace',
+  },
+});
+
+// ── Diff viewer styles ──────────────────────────────────────────────
+
+const createDiffStyles = (colors: ThemeColors) => StyleSheet.create({
+  container: {
+    flex: 1,
+    backgroundColor: '#0d1117',
+  },
+  header: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 16,
+    paddingTop: 12,
+    paddingBottom: 14,
+    backgroundColor: '#161b22',
+    borderBottomWidth: 1,
+    borderBottomColor: '#30363d',
+    gap: 10,
+  },
+  closeButton: {
+    width: 32,
+    height: 32,
+    borderRadius: 8,
+    backgroundColor: '#30363d',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  closeText: {
+    color: '#c9d1d9',
+    fontSize: 18,
+    fontWeight: '700',
+  },
+  headerTag: {
+    borderRadius: 4,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+  },
+  headerTagText: {
+    color: '#fff',
+    fontSize: 10,
+    fontWeight: '800',
+    letterSpacing: 0.3,
+  },
+  headerInfo: {
+    flex: 1,
+  },
+  headerFileName: {
+    color: '#c9d1d9',
+    fontSize: 16,
+    fontWeight: '700',
+  },
+  headerFilePath: {
+    color: '#8b949e',
+    fontSize: 11,
+    marginTop: 2,
+  },
+  headerStats: {
+    flexDirection: 'row',
     gap: 6,
   },
   statsAdd: {
-    color: '#34C759',
-    fontSize: 12,
-    fontWeight: '700',
-    fontFamily: 'monospace',
-  },
-  statsRemove: {
-    color: '#FF3B30',
-    fontSize: 12,
-    fontWeight: '700',
-    fontFamily: 'monospace',
-  },
-  chevron: {
-    color: colors.textSecondary,
+    color: '#3fb950',
     fontSize: 14,
-    marginLeft: 4,
+    fontWeight: '700',
+    fontFamily: 'monospace',
   },
-  diffScroll: {
-    maxHeight: 280,
+  statsDel: {
+    color: '#f85149',
+    fontSize: 14,
+    fontWeight: '700',
+    fontFamily: 'monospace',
+  },
+  scrollView: {
+    flex: 1,
   },
   diffContent: {
     paddingVertical: 4,
@@ -282,71 +360,47 @@ const createStyles = (colors: ThemeColors) => StyleSheet.create({
   },
   diffLine: {
     flexDirection: 'row',
-    paddingHorizontal: 10,
-    paddingVertical: 1,
+    paddingRight: 10,
     minHeight: 22,
     alignItems: 'center',
   },
   diffLineAdd: {
-    backgroundColor: 'rgba(52, 199, 89, 0.12)',
+    backgroundColor: 'rgba(63, 185, 80, 0.15)',
   },
   diffLineRemove: {
-    backgroundColor: 'rgba(255, 59, 48, 0.12)',
+    backgroundColor: 'rgba(248, 81, 73, 0.15)',
+  },
+  diffLineHeader: {
+    backgroundColor: 'rgba(56, 139, 253, 0.1)',
+    paddingVertical: 4,
+    marginTop: 6,
+  },
+  lineNumber: {
+    width: 36,
+    fontFamily: 'monospace',
+    fontSize: 11,
+    color: '#484f58',
+    textAlign: 'right',
+    paddingRight: 8,
   },
   diffLinePrefix: {
     width: 18,
     fontFamily: 'monospace',
     fontSize: 12,
     fontWeight: '700',
-    color: colors.textSecondary,
+    color: '#484f58',
     textAlign: 'center',
   },
-  diffLinePrefixAdd: {
-    color: '#34C759',
-  },
-  diffLinePrefixRemove: {
-    color: '#FF3B30',
-  },
+  prefixAdd: { color: '#3fb950' },
+  prefixRemove: { color: '#f85149' },
+  prefixHeader: { color: '#388bfd' },
   diffLineText: {
     fontFamily: 'monospace',
     fontSize: 12,
     lineHeight: 20,
   },
-  diffLineTextAdd: {
-    color: '#34C759',
-  },
-  diffLineTextRemove: {
-    color: '#FF3B30',
-  },
-  diffLineTextContext: {
-    color: colors.textSecondary,
-  },
-  actions: {
-    flexDirection: 'row',
-    borderTopWidth: 1,
-    borderTopColor: colors.border,
-  },
-  actionButton: {
-    flex: 1,
-    paddingVertical: 12,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  rejectButton: {
-    borderRightWidth: 1,
-    borderRightColor: colors.border,
-  },
-  rejectButtonText: {
-    color: '#FF3B30',
-    fontSize: 14,
-    fontWeight: '600',
-  },
-  acceptButton: {
-    backgroundColor: 'rgba(52, 199, 89, 0.08)',
-  },
-  acceptButtonText: {
-    color: '#34C759',
-    fontSize: 14,
-    fontWeight: '600',
-  },
+  textAdd: { color: '#aff5b4' },
+  textRemove: { color: '#ffd7d5' },
+  textHeader: { color: '#388bfd', fontStyle: 'italic' },
+  textContext: { color: '#8b949e' },
 });

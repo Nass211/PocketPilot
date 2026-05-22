@@ -12,6 +12,13 @@ export interface AvailableModel {
   vendor: string;
 }
 
+export interface ModifiedFile {
+  file: string;
+  additions: number;
+  deletions: number;
+  diff: string;
+}
+
 import { PermissionRequestPayload } from '../components/PermissionModal';
 import { UserInputRequestPayload } from '../components/UserInputModal';
 import { ActionButtonPayload } from '../components/ActionButtons';
@@ -36,6 +43,7 @@ export function useWebSocket(initialCallbacks: WebSocketCallbacks = {}) {
   const [cliStatus, setCliStatus] = useState<CliStatus>('unknown');
   const [availableModels, setAvailableModels] = useState<AvailableModel[]>([]);
   const [activity, setActivity] = useState<string>('');
+  const [modifiedFiles, setModifiedFiles] = useState<ModifiedFile[]>([]);
 
   const wsRef = useRef<WebSocketService | null>(null);
   
@@ -119,6 +127,11 @@ export function useWebSocket(initialCallbacks: WebSocketCallbacks = {}) {
           case 'activity':
             setActivity(msg.label || '');
             break;
+          case 'files_modified':
+            if (msg.files && Array.isArray(msg.files)) {
+              setModifiedFiles(msg.files);
+            }
+            break;
         }
       }
     });
@@ -154,6 +167,8 @@ export function useWebSocket(initialCallbacks: WebSocketCallbacks = {}) {
     cliStatus,
     availableModels,
     activity,
+    modifiedFiles,
+    clearModifiedFiles: () => setModifiedFiles([]),
     connect,
     disconnect,
     send,

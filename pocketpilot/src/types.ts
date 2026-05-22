@@ -37,4 +37,5 @@ export type OutgoingMessage =
     | { type: 'cli_status'; status: 'running' | 'crashed' | 'reconnecting' }
     | { type: 'notification'; title: string; body: string }
     | { type: 'activity'; label: string }
+    | { type: 'files_modified'; files: Array<{ file: string; additions: number; deletions: number; diff: string }> }
     | { type: 'models_available'; models: { id: string; displayName: string; vendor: string }[] };

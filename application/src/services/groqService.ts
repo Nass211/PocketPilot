@@ -26,7 +26,7 @@ export async function transcribeAudio(audioUri: string): Promise<string> {
     name: fileName,
   } as any);
   formData.append('model', 'whisper-large-v3-turbo');
-  formData.append('language', 'en');
+  // Removed hardcoded 'language': 'en' to allow Groq Whisper to auto-detect language
   formData.append('response_format', 'json');
 
   const response = await fetch(GROQ_WHISPER_URL, {

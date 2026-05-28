@@ -108,24 +108,40 @@ export class SessionManager extends EventEmitter {
     // Workspace file state snapshot — taken before each prompt to detect changes
     private fileHashesBaseline: Map<string, string> = new Map();
 
+    private static readonly MULTILINGUAL_RULES = [
+        'Tu es un assistant vocal intelligent multilingue.',
+        'Règles :',
+        '- Si l’utilisateur parle en français, réponds en français.',
+        '- Si l’utilisateur parle en anglais, réponds en anglais.',
+        '- Si l’utilisateur parle en darija marocaine, réponds en darija.',
+        '- Détecte automatiquement la langue de l’audio.',
+        '- Réponds naturellement sans traduire sauf si demandé.'
+    ].join('\n');
+
     private static readonly MODE_INSTRUCTIONS: Record<string, string> = {
         ask: [
+            SessionManager.MULTILINGUAL_RULES,
+            '',
             'You are a helpful coding assistant.',
             'Answer questions clearly and concisely.',
             'Focus on explaining concepts, reviewing code, and answering technical questions.',
             'Do not suggest file changes unless explicitly asked.',
-        ].join(' '),
+        ].join('\n'),
         agent: [
+            SessionManager.MULTILINGUAL_RULES,
+            '',
             'You are a coding agent.',
             'Help the user by writing code, suggesting file changes, and running terminal commands.',
             'Always explain what you are doing before making changes.',
-        ].join(' '),
+        ].join('\n'),
         plan: [
+            SessionManager.MULTILINGUAL_RULES,
+            '',
             'You are a planning assistant.',
             'When given a task, create a detailed numbered step-by-step implementation plan.',
             'Do NOT implement anything — only plan.',
             'After presenting the plan, wait for the user to approve before taking any action.',
-        ].join(' '),
+        ].join('\n'),
     };
 
     constructor(context: vscode.ExtensionContext) {

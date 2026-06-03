@@ -72,6 +72,11 @@ export const useChat = (ws?: any) => {
   }, [ws]);
 
   const onChunk = useCallback((content: string) => {
+    // Ensure isGenerating is true — handles chunks from server-initiated
+    // prompts (e.g. "Start Implementation" action) where sendPrompt() was
+    // never called on the phone side.
+    setIsGenerating(true);
+
     setMessages(prev => {
       const newMessages = [...prev];
       const lastIndex = newMessages.length - 1;
@@ -81,6 +86,15 @@ export const useChat = (ws?: any) => {
           ...newMessages[lastIndex],
           content: newMessages[lastIndex].content + content
         };
+      } else {
+        // No assistant bubble exists yet (action-triggered prompt) — create one
+        newMessages.push({
+          id: Date.now().toString() + '_assistant',
+          role: 'assistant',
+          content,
+          isStreaming: true,
+          timestamp: Date.now(),
+        });
       }
       return newMessages;
     });
